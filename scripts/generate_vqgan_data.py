@@ -148,6 +148,34 @@ def load_img(path):
     return 2.*image - 1.
 
 
+def parse_sr_get_input(model, samples, return_first_stage_outputs=True):
+    """StableSR get_input + optional HQ Canny hint for ControlNet sampling."""
+    out = model.get_input(
+        samples,
+        return_first_stage_outputs=return_first_stage_outputs,
+        val=True,
+        text_cond=[''],
+    )
+    if not return_first_stage_outputs:
+        return out
+
+    init_latent, text_init, latent_gt, init_image, gt, gt_recon = out[:6]
+    canny_hint = None
+    z_canny = None
+    if getattr(model, "use_hq_canny_cond", False):
+        if getattr(model, "canny_controlnet", None) is not None:
+            from ldm.canny_util import compute_binary_canny_tensor
+            gt_01 = (gt + 1.0) * 0.5
+            canny_hint = compute_binary_canny_tensor(gt_01.clamp(0, 1)).to(gt.device)
+        elif getattr(model, "canny_structcond_stage_model", None) is not None:
+            from ldm.canny_util import compute_binary_canny_tensor
+            gt_01 = (gt + 1.0) * 0.5
+            canny_rgb = compute_binary_canny_tensor(gt_01.clamp(0, 1)) * 2.0 - 1.0
+            enc = model.encode_first_stage(canny_rgb.to(gt.device))
+            z_canny = model.get_first_stage_encoding(enc).detach()
+    return init_latent, text_init, latent_gt, init_image, gt, gt_recon, canny_hint, z_canny
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -290,6 +318,12 @@ def main():
         default=0,
         help="start_num",
     )
+    parser.add_argument(
+        "--max_images",
+        type=int,
+        default=0,
+        help="stop after this many images (0 = use built-in cap of 5000)",
+    )
 
     opt = parser.parse_args()
     seed_everything(opt.seed)
@@ -330,14 +364,17 @@ def main():
 
     # data
     dataset = RealESRGANDataset(config.test_data.params.test.params)
+    shuffle_test = config.test_data.params.get("shuffle", False)
     test_dataloader = DataLoader(
         dataset,
         batch_size=config.test_data.params.batch_size,
-        shuffle=True,
+        shuffle=shuffle_test,
         num_workers=config.test_data.params.num_workers,
         collate_fn=None,
         pin_memory=False,
      )
+
+    max_images = opt.max_images if opt.max_images > 0 else 5000
 
     model.register_schedule(given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=0.00085, linear_end=0.0120, cosine_s=8e-3)
@@ -384,17 +421,32 @@ def main():
                         total_num += 1
                         continue
                     else:
-                        init_latent, text_init, latent_gt, init_image, gt, gt_recon = model.get_input(samples, return_first_stage_outputs=True)
-                        text_init = ['']*init_image.size(0)
+                        (init_latent, text_init, latent_gt, init_image, gt, gt_recon,
+                         canny_hint, z_canny) = parse_sr_get_input(
+                            model, samples, return_first_stage_outputs=True)
+                        text_init = [''] * init_image.size(0)
                         semantic_c = model.cond_stage_model(text_init)
 
                         noise = torch.randn_like(init_latent)
                         t = repeat(torch.tensor([999]), '1 -> b', b=init_image.size(0))
                         t = t.to(device).long()
                         x_T = model_ori.q_sample(x_start=init_latent, t=t, noise=noise)
-                        # x_T = None
 
-                        samples, _ = model.sample(cond=semantic_c, struct_cond=init_latent, batch_size=init_image.size(0), timesteps=opt.ddpm_steps, time_replace=opt.ddpm_steps, x_T=x_T, return_intermediates=True, adain_fea=None)
+                        sample_kw = dict(
+                            cond=semantic_c,
+                            struct_cond=init_latent,
+                            batch_size=init_image.size(0),
+                            timesteps=opt.ddpm_steps,
+                            time_replace=opt.ddpm_steps,
+                            x_T=x_T,
+                            return_intermediates=True,
+                            adain_fea=None,
+                        )
+                        if canny_hint is not None:
+                            sample_kw["canny_hint"] = canny_hint
+                        elif z_canny is not None:
+                            sample_kw["z_canny"] = z_canny
+                        samples, _ = model.sample(**sample_kw)
 
                         x_samples = model.decode_first_stage(samples)
                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
@@ -424,8 +476,7 @@ def main():
 
                                     base_i += 1
                                     total_num += 1
-                    # Number of images to generate each time
-                    if total_num > 5000:
+                    if total_num >= max_images:
                         break
 
                 toc = time.time()

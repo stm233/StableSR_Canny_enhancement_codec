@@ -481,11 +481,16 @@ class AutoencoderKLResi(pl.LightningModule):
                  synthesis_data=False,
                  use_usm=False,
                  test_gt=False,
+                 use_canny_cfw=False,
+                 canny_controlnet_stage_config=None,
+                 controlnet_ckpt_path=None,
                  ):
         super().__init__()
         self.image_key = image_key
+        self.use_canny_cfw = use_canny_cfw
+        self.canny_controlnet_for_cfw = None
         self.encoder = Encoder(**ddconfig)
-        self.decoder = Decoder_Mix(**ddconfig)
+        self.decoder = Decoder_Mix(**ddconfig, use_canny_cfw=use_canny_cfw)
         self.decoder.fusion_w = fusion_w
         self.loss = instantiate_from_config(lossconfig)
         self.quant_conv = torch.nn.Conv2d(2*ddconfig["z_channels"], 2*embed_dim, 1)
@@ -506,6 +511,15 @@ class AutoencoderKLResi(pl.LightningModule):
         self.synthesis_data = synthesis_data
         self.use_usm = use_usm
         self.test_gt = test_gt
+
+        if self.use_canny_cfw and canny_controlnet_stage_config is not None:
+            self.canny_controlnet_for_cfw = instantiate_from_config(canny_controlnet_stage_config)
+            if controlnet_ckpt_path is not None:
+                self._load_controlnet_for_cfw(controlnet_ckpt_path)
+            self.canny_controlnet_for_cfw.eval()
+            for p in self.canny_controlnet_for_cfw.parameters():
+                p.requires_grad = False
+            print('CFW+Canny: frozen ControlNet (input_hint_block + cfw_hint_align) for hint features')
 
         if freeze_dec:
             for name, param in self.named_parameters():
@@ -561,14 +575,56 @@ class AutoencoderKLResi(pl.LightningModule):
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
-        missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
-            sd, strict=False)
+        target = self if not only_model else self.model
+        model_sd = target.state_dict()
+        shape_mismatch = []
+        filtered_sd = {}
+        for k, v in sd.items():
+            if k in model_sd and model_sd[k].shape != v.shape:
+                shape_mismatch.append(k)
+                continue
+            filtered_sd[k] = v
+        if shape_mismatch:
+            print(
+                f"Skipped {len(shape_mismatch)} keys with shape mismatch "
+                f"(e.g. 2-way vs 3-way CFW fusion); will train from init."
+            )
+        missing, unexpected = target.load_state_dict(filtered_sd, strict=False)
         print(f"Encoder Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
         if len(missing) > 0:
             print(f"Missing Keys: {missing}")
         if len(unexpected) > 0:
             print(f"Unexpected Keys: {unexpected}")
         return missing
+
+    def _load_controlnet_for_cfw(self, ckpt_path):
+        sd = torch.load(ckpt_path, map_location='cpu')
+        if 'state_dict' in sd:
+            sd = sd['state_dict']
+        cn_sd = {}
+        for k, v in sd.items():
+            if k.startswith('canny_controlnet.'):
+                cn_sd[k.replace('canny_controlnet.', '', 1)] = v
+        if not cn_sd:
+            print(f'CFW: no canny_controlnet.* in {ckpt_path}')
+            return
+        missing, unexpected = self.canny_controlnet_for_cfw.load_state_dict(cn_sd, strict=False)
+        print(f'CFW: loaded ControlNet from {ckpt_path}, missing={len(missing)}, unexpected={len(unexpected)}')
+
+    @torch.no_grad()
+    def _enc_fea_canny_from_gt(self, gt_minus1_1):
+        """Canny hint -> input_hint_block (same weights as trained ControlNet)."""
+        from ldm.canny_util import compute_binary_canny_tensor, encode_hint_for_cfw
+
+        if self.canny_controlnet_for_cfw is None:
+            return None
+        gt_01 = (gt_minus1_1 + 1.0) * 0.5
+        hint = compute_binary_canny_tensor(gt_01.clamp(0, 1))
+        b = hint.shape[0]
+        device = hint.device
+        t = torch.full((b,), 999, device=device, dtype=torch.long)
+        context = torch.zeros(b, 77, 1024, device=device, dtype=hint.dtype)
+        return encode_hint_for_cfw(self.canny_controlnet_for_cfw, hint, t, context)
 
     def encode(self, x):
         h, enc_fea = self.encoder(x, return_fea=True)
@@ -583,14 +639,18 @@ class AutoencoderKLResi(pl.LightningModule):
         posterior = DiagonalGaussianDistribution(moments)
         return posterior, moments
 
-    def decode(self, z, enc_fea):
+    def decode(self, z, enc_fea, enc_fea_canny=None):
         z = self.post_quant_conv(z)
-        dec = self.decoder(z, enc_fea)
+        dec = self.decoder(z, enc_fea, enc_fea_canny=enc_fea_canny)
         return dec
 
-    def forward(self, input, latent, sample_posterior=True):
+    def forward(self, input, latent, enc_fea_canny=None, sample_posterior=True):
+        """
+        LQ -> VAE encoder -> enc_fea_lq (CFW).
+        Canny -> ControlNet.input_hint_block -> enc_fea_canny (pass in; not computed here).
+        """
         posterior, enc_fea_lq = self.encode(input)
-        dec = self.decode(latent, enc_fea_lq)
+        dec = self.decode(latent, enc_fea_lq, enc_fea_canny=enc_fea_canny)
         return dec, posterior
 
     @torch.no_grad()
@@ -836,7 +896,8 @@ class AutoencoderKLResi(pl.LightningModule):
             inputs, gts, latents, _ = self.get_input_synthesis(batch, val=False)
         else:
             inputs, gts, latents, _ = self.get_input(batch)
-        reconstructions, posterior = self(inputs, latents)
+        enc_fea_canny = self._enc_fea_canny_from_gt(gts) if self.use_canny_cfw else None
+        reconstructions, posterior = self(inputs, latents, enc_fea_canny=enc_fea_canny)
 
         if optimizer_idx == 0:
             # train encoder+decoder+logvar
@@ -858,7 +919,7 @@ class AutoencoderKLResi(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         inputs, gts, latents, _ = self.get_input(batch)
 
-        reconstructions, posterior = self(inputs, latents)
+        reconstructions, posterior = self(inputs, latents, gt_for_canny=gts)
         aeloss, log_dict_ae = self.loss(gts, reconstructions, posterior, 0, self.global_step,
                                         last_layer=self.get_last_layer(), split="val")
 
@@ -892,10 +953,11 @@ class AutoencoderKLResi(pl.LightningModule):
         else:
             x, gts, latents, samples = self.get_input(batch)
         x = x.to(self.device)
+        gts = gts.to(self.device)
         latents = latents.to(self.device)
         samples = samples.to(self.device)
         if not only_inputs:
-            xrec, posterior = self(x, latents)
+            xrec, posterior = self(x, latents, enc_fea_canny=None)
             if x.shape[1] > 3:
                 # colorize with random projection
                 assert xrec.shape[1] > 3

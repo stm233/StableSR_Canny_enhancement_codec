@@ -1304,12 +1304,14 @@ class UNetModelDualcondV2(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps=None, context=None, struct_cond=None, y=None,**kwargs):
+    def forward(self, x, timesteps=None, context=None, struct_cond=None, canny_control=None,
+                only_mid_canny_control=False, y=None, **kwargs):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
         :param context: conditioning plugged in via crossattn
+        :param canny_control: optional list from ControlNet (added to skip connections)
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
@@ -1329,8 +1331,13 @@ class UNetModelDualcondV2(nn.Module):
             h = module(h, emb, context, struct_cond)
             hs.append(h)
         h = self.middle_block(h, emb, context, struct_cond)
+        if canny_control is not None:
+            h = h + canny_control.pop()
         for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
+            if only_mid_canny_control or canny_control is None:
+                h = th.cat([h, hs.pop()], dim=1)
+            else:
+                h = th.cat([h, hs.pop() + canny_control.pop()], dim=1)
             h = module(h, emb, context, struct_cond)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:

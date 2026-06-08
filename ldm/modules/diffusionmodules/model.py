@@ -2,6 +2,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from einops import rearrange
 
@@ -678,8 +679,10 @@ class Decoder_Mix(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, z_channels, give_pre_end=False, tanh_out=False, use_linear_attn=False,
-                 attn_type="vanilla", num_fuse_block=2, fusion_w=1.0, **ignorekwargs):
+                 attn_type="vanilla", num_fuse_block=2, fusion_w=1.0, use_canny_cfw=False, **ignorekwargs):
         super().__init__()
+        self.use_canny_cfw = use_canny_cfw
+        self.fuse_n_cond = 3 if use_canny_cfw else 2
         if use_linear_attn: attn_type = "linear"
         self.ch = ch
         self.temb_ch = 0
@@ -727,7 +730,8 @@ class Decoder_Mix(nn.Module):
 
             if i_level != self.num_resolutions-1:
                 if i_level != 0:
-                    fuse_layer = Fuse_sft_block_RRDB(in_ch=block_out, out_ch=block_out, num_block=num_fuse_block)
+                    fuse_layer = Fuse_sft_block_RRDB(
+                        in_ch=block_out, out_ch=block_out, num_block=num_fuse_block, n_cond=self.fuse_n_cond)
                     setattr(self, 'fusion_layer_{}'.format(i_level), fuse_layer)
 
             for i_block in range(self.num_res_blocks+1):
@@ -755,7 +759,7 @@ class Decoder_Mix(nn.Module):
                                         stride=1,
                                         padding=1)
 
-    def forward(self, z, enc_fea):
+    def forward(self, z, enc_fea, enc_fea_canny=None):
         #assert z.shape[1:] == self.z_shape[1:]
         self.last_z_shape = z.shape
 
@@ -779,7 +783,10 @@ class Decoder_Mix(nn.Module):
 
             if i_level != self.num_resolutions-1 and i_level != 0:
                 cur_fuse_layer = getattr(self, 'fusion_layer_{}'.format(i_level))
-                h = cur_fuse_layer(enc_fea[i_level-1], h, self.fusion_w)
+                canny_fea = None
+                if self.use_canny_cfw and enc_fea_canny is not None:
+                    canny_fea = enc_fea_canny[i_level - 1]
+                h = cur_fuse_layer(enc_fea[i_level - 1], h, self.fusion_w, enc_feat_canny=canny_fea)
 
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
@@ -820,14 +827,31 @@ class ResBlock(nn.Module):
         return x + x_in
 
 class Fuse_sft_block_RRDB(nn.Module):
-    def __init__(self, in_ch, out_ch, num_block=1, num_grow_ch=32):
+    """CFW fusion: concat encoder (LQ) features with decoder features; optional Canny branch."""
+
+    def __init__(self, in_ch, out_ch, num_block=1, num_grow_ch=32, n_cond=2):
         super().__init__()
-        self.encode_enc_1 = ResBlock(2*in_ch, in_ch)
+        assert n_cond in (2, 3), "n_cond=2: [LQ, dec]; n_cond=3: [LQ, Canny, dec]"
+        self.n_cond = n_cond
+        self.encode_enc_1 = ResBlock(n_cond * in_ch, in_ch)
         self.encode_enc_2 = make_layer(RRDB, num_block, num_feat=in_ch, num_grow_ch=num_grow_ch)
         self.encode_enc_3 = ResBlock(in_ch, out_ch)
 
-    def forward(self, enc_feat, dec_feat, w=1):
-        enc_feat = self.encode_enc_1(torch.cat([enc_feat, dec_feat], dim=1))
+    def forward(self, enc_feat, dec_feat, w=1, enc_feat_canny=None):
+        if self.n_cond == 3:
+            if enc_feat_canny is None:
+                enc_feat_canny = torch.zeros_like(enc_feat)
+            elif enc_feat_canny.shape[-2:] != enc_feat.shape[-2:]:
+                enc_feat_canny = F.interpolate(
+                    enc_feat_canny,
+                    size=enc_feat.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            fused_in = torch.cat([enc_feat, enc_feat_canny, dec_feat], dim=1)
+        else:
+            fused_in = torch.cat([enc_feat, dec_feat], dim=1)
+        enc_feat = self.encode_enc_1(fused_in)
         enc_feat = self.encode_enc_2(enc_feat)
         enc_feat = self.encode_enc_3(enc_feat)
         residual = w * enc_feat

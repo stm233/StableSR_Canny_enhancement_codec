@@ -1,0 +1,17 @@
+# Inference / metrics on DIV2K valid 100 (512 HR, 128 LQ) — not StableSR 3000 test set.
+# Prepare data: python scripts/prepare_div2k_valid_test.py
+
+test_data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 2
+    wrap: false
+    test:
+      target: basicsr.data.paired_paths_dataset.PairedPathsDataset
+      params:
+        gt_path: "/data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512"
+        lq_path: "/data/Dataset/DIV2K/DIV2K_valid_100_512_128/LR_128"
+        image_type: png
+        io_backend:
+          type: disk

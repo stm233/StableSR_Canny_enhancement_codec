@@ -1,0 +1,156 @@
+# Stage 2 only: generate CFW pairs via scripts/generate_vqgan_data.py
+# Model matches v2-finetune_text_T_512_controlnet_canny; weights from --ckpt (finetuned epoch).
+# Smoke test: DIV2K Valid 100 HR, online RealESRGAN degradation (same as official CFW pipeline).
+
+sf: 4
+model:
+  base_learning_rate: 5.0e-05
+  target: ldm.models.diffusion.ddpm.LatentDiffusionSRTextWT
+  params:
+    linear_start: 0.00085
+    linear_end: 0.0120
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: image
+    cond_stage_key: caption
+    image_size: 512
+    channels: 4
+    cond_stage_trainable: False
+    conditioning_key: crossattn
+    monitor: val/loss_simple_ema
+    scale_factor: 0.18215
+    use_ema: False
+
+    ckpt_path: /home/exx/Documents/Tianma/StableSR/checkpoints/stablesr_000117.ckpt
+    unfrozen_diff: False
+    random_size: False
+    time_replace: 1000
+    use_usm: True
+
+    use_hq_canny_cond: true
+    canny_cond_weight: 1
+    hq_canny_train_lq_structcond: false
+    only_mid_canny_control: false
+
+    # Skip safetensors preload; use --ckpt with your finetuned ControlNet SR weights
+    controlnet_ckpt_path: null
+    controlnet_train_mode: zero_hint_only
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModelDualcondV2
+      params:
+        image_size: 32
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_head_channels: 64
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        use_checkpoint: False
+        legacy: False
+        semb_channels: 256
+
+    first_stage_config:
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 512
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult: [ 1, 2, 4, 4 ]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    cond_stage_config:
+      target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+      params:
+        freeze: True
+        layer: "penultimate"
+
+    structcond_stage_config:
+      target: ldm.modules.diffusionmodules.openaimodel.EncoderUNetModelWT
+      params:
+        image_size: 96
+        in_channels: 4
+        model_channels: 256
+        out_channels: 256
+        num_res_blocks: 2
+        attention_resolutions: [ 4, 2, 1 ]
+        dropout: 0
+        channel_mult: [ 1, 1, 2, 2 ]
+        conv_resample: True
+        dims: 2
+        use_checkpoint: False
+        use_fp16: False
+        num_heads: 4
+        num_head_channels: -1
+        num_heads_upsample: -1
+        use_scale_shift_norm: False
+        resblock_updown: False
+        use_new_attention_order: False
+
+    canny_controlnet_stage_config:
+      target: ldm.modules.controlnet_cldm.ControlNet
+      params:
+        image_size: 32
+        in_channels: 4
+        hint_channels: 3
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_head_channels: 64
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        use_checkpoint: False
+        legacy: False
+
+test_data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 2
+    num_workers: 4
+    shuffle: false
+    wrap: false
+    test:
+      target: basicsr.data.realesrgan_dataset.RealESRGANDataset
+      params:
+        gt_path: /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512
+        num_pic: 100
+        crop_size: 512
+        io_backend:
+          type: disk
+        blur_kernel_size: 21
+        kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+        kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+        sinc_prob: 0.1
+        blur_sigma: [0.2, 1.5]
+        betag_range: [0.5, 2.0]
+        betap_range: [1, 1.5]
+        blur_kernel_size2: 11
+        kernel_list2: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+        kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+        sinc_prob2: 0.1
+        blur_sigma2: [0.2, 1.0]
+        betag_range2: [0.5, 2.0]
+        betap_range2: [1, 1.5]
+        final_sinc_prob: 0.8
+        gt_size: 512
+        use_hflip: false
+        use_rot: false

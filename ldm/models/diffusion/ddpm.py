@@ -1582,6 +1582,15 @@ class LatentDiffusionSRTextWT(DDPM):
                  time_replace=None,
                  use_usm=False,
                  mix_ratio=0.0,
+                 use_hq_canny_cond=False,
+                 canny_cond_weight=1.0,
+                 canny_structcond_stage_config=None,
+                 canny_controlnet_stage_config=None,
+                 controlnet_ckpt_path=None,
+                 controlnet_init_from_unet=True,
+                 only_mid_canny_control=False,
+                 hq_canny_train_lq_structcond=False,
+                 controlnet_train_mode='full',
                  *args, **kwargs):
         # put this in your init
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
@@ -1592,6 +1601,13 @@ class LatentDiffusionSRTextWT(DDPM):
         self.time_replace = time_replace
         self.use_usm = use_usm
         self.mix_ratio = mix_ratio
+        self.use_hq_canny_cond = use_hq_canny_cond
+        self.canny_cond_weight = canny_cond_weight
+        self.controlnet_ckpt_path = controlnet_ckpt_path
+        self.controlnet_init_from_unet = controlnet_init_from_unet
+        self.only_mid_canny_control = only_mid_canny_control
+        self.hq_canny_train_lq_structcond = hq_canny_train_lq_structcond
+        self.controlnet_train_mode = controlnet_train_mode
         assert self.num_timesteps_cond <= kwargs['timesteps']
         # for backwards compatibility after implementation of DiffusionWrapper
         if conditioning_key is None:
@@ -1615,6 +1631,12 @@ class LatentDiffusionSRTextWT(DDPM):
         self.instantiate_first_stage(first_stage_config)
         self.instantiate_cond_stage(cond_stage_config)
         self.instantiate_structcond_stage(structcond_stage_config)
+        self.canny_structcond_stage_model = None
+        self.canny_controlnet = None
+        if canny_controlnet_stage_config is not None:
+            self.instantiate_canny_controlnet(canny_controlnet_stage_config)
+        elif canny_structcond_stage_config is not None:
+            self.instantiate_canny_structcond_stage(canny_structcond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
         self.bbox_tokenizer = None
@@ -1624,7 +1646,25 @@ class LatentDiffusionSRTextWT(DDPM):
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
 
-        if not self.unfrozen_diff:
+        if self.canny_controlnet is not None and self.controlnet_init_from_unet:
+            self._copy_unet_encoder_to_controlnet()
+        if self.canny_controlnet is not None:
+            self._set_controlnet_trainable()
+
+        if self.use_hq_canny_cond and (
+            self.canny_controlnet is not None or self.canny_structcond_stage_model is not None
+        ):
+            # Train only canny branch (ControlNet or legacy struct encoder); keep LQ structcond + UNet frozen.
+            for _, param in self.model.named_parameters():
+                param.requires_grad = False
+            for _, param in self.cond_stage_model.named_parameters():
+                param.requires_grad = False
+            for _, param in self.structcond_stage_model.named_parameters():
+                param.requires_grad = self.hq_canny_train_lq_structcond
+            if self.canny_structcond_stage_model is not None:
+                for _, param in self.canny_structcond_stage_model.named_parameters():
+                    param.requires_grad = True
+        elif not self.unfrozen_diff:
             self.model.eval()
             # self.model.train = disabled_train
             for name, param in self.model.named_parameters():
@@ -1743,6 +1783,124 @@ class LatentDiffusionSRTextWT(DDPM):
         model = instantiate_from_config(config)
         self.structcond_stage_model = model
         self.structcond_stage_model.train()
+
+    def instantiate_canny_structcond_stage(self, config):
+        model = instantiate_from_config(config)
+        self.canny_structcond_stage_model = model
+        self.canny_structcond_stage_model.train()
+
+    def encode_struct_cond(self, z_struct, t, z_canny=None):
+        """
+        Multi-scale structural condition for SPADE (LR latent + optional HQ-canny latent).
+        Used by training forward() and inference p_sample_loop when z_canny is provided.
+        """
+        struc_c = self.structcond_stage_model(z_struct, t)
+        if (
+            getattr(self, "use_hq_canny_cond", False)
+            and z_canny is not None
+            and getattr(self, "canny_structcond_stage_model", None) is not None
+        ):
+            canny_c = self.canny_structcond_stage_model(z_canny, t)
+            w = float(self.canny_cond_weight)
+            struc_c = {k: (struc_c[k] + w * canny_c[k]) for k in struc_c.keys()}
+        return struc_c
+
+    def instantiate_canny_controlnet(self, config):
+        model = instantiate_from_config(config)
+        self.canny_controlnet = model
+        self.canny_controlnet.train()
+        if self.controlnet_ckpt_path is not None:
+            self._load_controlnet_weights(self.controlnet_ckpt_path)
+
+    def _load_controlnet_weights(self, ckpt_path):
+        import os
+        if not os.path.isfile(ckpt_path):
+            print(f'ControlNet ckpt not found (skip): {ckpt_path}')
+            return
+        print(f'Loading ControlNet weights from {ckpt_path}')
+        if ckpt_path.endswith('.safetensors'):
+            from safetensors.torch import load_file
+            sd = load_file(ckpt_path, device='cpu')
+        else:
+            sd = torch.load(ckpt_path, map_location='cpu')
+            if 'state_dict' in sd:
+                sd = sd['state_dict']
+        cn_sd = {}
+        for k, v in sd.items():
+            if k.startswith('control_model.'):
+                cn_sd[k.replace('control_model.', '', 1)] = v
+            elif k.startswith('canny_controlnet.'):
+                cn_sd[k.replace('canny_controlnet.', '', 1)] = v
+        if len(cn_sd) == 0:
+            cn_sd = {k: v for k, v in sd.items() if 'input_hint_block' in k or 'zero_convs' in k
+                     or k.startswith('input_blocks') or k.startswith('middle_block')
+                     or k.startswith('time_embed')}
+        model_sd = self.canny_controlnet.state_dict()
+        load_sd = {}
+        matched, shape_mismatch = 0, 0
+        for k, v in cn_sd.items():
+            if k not in model_sd:
+                continue
+            if model_sd[k].shape != v.shape:
+                shape_mismatch += 1
+                continue
+            load_sd[k] = v
+            matched += 1
+        missing, unexpected = self.canny_controlnet.load_state_dict(load_sd, strict=False)
+        print(f'  controlnet load: matched={matched}, shape_mismatch={shape_mismatch}, '
+              f'missing={len(missing)}, unexpected={len(unexpected)}')
+
+    def _copy_unet_encoder_to_controlnet(self):
+        """Copy StableSR UNet encoder weights into ControlNet (same SD2.1 backbone)."""
+        if self.canny_controlnet is None:
+            return
+        unet = self.model.diffusion_model
+        cn = self.canny_controlnet
+        copied = 0
+        u_sd, c_sd = unet.time_embed.state_dict(), cn.time_embed.state_dict()
+        for k in u_sd:
+            if k in c_sd and c_sd[k].shape == u_sd[k].shape:
+                c_sd[k].copy_(u_sd[k].to(c_sd[k].device))
+                copied += 1
+        cn.time_embed.load_state_dict(c_sd, strict=False)
+        for u_blk, c_blk in zip(unet.input_blocks, cn.input_blocks):
+            u_sd, c_sd = u_blk.state_dict(), c_blk.state_dict()
+            for k in u_sd:
+                if k in c_sd and c_sd[k].shape == u_sd[k].shape:
+                    c_sd[k].copy_(u_sd[k].to(c_sd[k].device))
+                    copied += 1
+            c_blk.load_state_dict(c_sd, strict=False)
+        u_sd, c_sd = unet.middle_block.state_dict(), cn.middle_block.state_dict()
+        for k in u_sd:
+            if k in c_sd and c_sd[k].shape == u_sd[k].shape:
+                c_sd[k].copy_(u_sd[k].to(c_sd[k].device))
+                copied += 1
+        cn.middle_block.load_state_dict(c_sd, strict=False)
+        print(f'  controlnet init from StableSR UNet encoder: copied {copied} tensors')
+
+    def _set_controlnet_trainable(self):
+        mode = getattr(self, 'controlnet_train_mode', 'full') or 'full'
+        cn = self.canny_controlnet
+        if mode == 'zero_hint_only':
+            for param in cn.parameters():
+                param.requires_grad = False
+            for name, param in cn.named_parameters():
+                if 'zero_convs' in name or 'input_hint_block' in name or 'middle_block_out' in name:
+                    param.requires_grad = True
+        else:
+            for param in cn.parameters():
+                param.requires_grad = True
+
+    def get_canny_control(self, x_noisy, canny_hint, t, cond):
+        if self.canny_controlnet is None or canny_hint is None:
+            return None
+        if isinstance(cond, dict):
+            cc = torch.cat(cond['c_crossattn'], 1)
+        else:
+            cc = torch.cat(cond, 1) if isinstance(cond, list) else cond
+        control = self.canny_controlnet(x=x_noisy, hint=canny_hint, timesteps=t, context=cc)
+        w = float(self.canny_cond_weight)
+        return [c * w for c in control]
 
     def _get_denoise_row_from_list(self, samples, desc='', force_no_decoder_quantization=False):
         denoise_row = []
@@ -2117,6 +2275,11 @@ class LatentDiffusionSRTextWT(DDPM):
         out = [z, text_cond]
         out.append(z_gt)
 
+        if getattr(self, 'use_hq_canny_cond', False) and getattr(self, 'canny_controlnet', None) is not None:
+            from ldm.canny_util import compute_binary_canny_tensor
+            gt_01 = (y + 1.0) * 0.5
+            out.append(compute_binary_canny_tensor(gt_01.clamp(0, 1)))
+
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z_gt)
             out.extend([x, self.gt, xrec])
@@ -2287,11 +2450,16 @@ class LatentDiffusionSRTextWT(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c, gt = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c, gt)
+        out = self.get_input(batch, self.first_stage_key)
+        if len(out) == 4:
+            x, c, gt, canny_hint = out
+        else:
+            x, c, gt = out
+            canny_hint = None
+        loss = self(x, c, gt, canny_hint=canny_hint)
         return loss
 
-    def forward(self, x, c, gt, *args, **kwargs):
+    def forward(self, x, c, gt, *args, canny_hint=None, **kwargs):
         index = np.random.randint(0, self.num_timesteps, size=x.size(0))
         t = torch.from_numpy(index)
         t = t.to(self.device).long()
@@ -2313,7 +2481,7 @@ class LatentDiffusionSRTextWT(DDPM):
             struc_c = self.structcond_stage_model(gt, t_ori)
         else:
             struc_c = self.structcond_stage_model(x, t_ori)
-        return self.p_losses(gt, c, struc_c, t, t_ori, x, *args, **kwargs)
+        return self.p_losses(gt, c, struc_c, t, t_ori, x, canny_hint=canny_hint, *args, **kwargs)
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
@@ -2325,7 +2493,7 @@ class LatentDiffusionSRTextWT(DDPM):
 
         return [rescale_bbox(b) for b in bboxes]
 
-    def apply_model(self, x_noisy, t, cond, struct_cond, return_ids=False):
+    def apply_model(self, x_noisy, t, cond, struct_cond, return_ids=False, canny_hint=None):
 
         if isinstance(cond, dict):
             # hybrid case, cond is exptected to be a dict
@@ -2422,7 +2590,13 @@ class LatentDiffusionSRTextWT(DDPM):
 
         else:
             cond['struct_cond'] = struct_cond
-            x_recon = self.model(x_noisy, t, **cond)
+            canny_control = self.get_canny_control(x_noisy, canny_hint, t, cond)
+            x_recon = self.model(
+                x_noisy, t,
+                canny_control=canny_control,
+                only_mid_canny_control=self.only_mid_canny_control,
+                **cond,
+            )
 
         if isinstance(x_recon, tuple) and not return_ids:
             return x_recon[0]
@@ -2447,7 +2621,7 @@ class LatentDiffusionSRTextWT(DDPM):
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
         return mean_flat(kl_prior) / np.log(2.0)
 
-    def p_losses(self, x_start, cond, struct_cond, t, t_ori, z_gt, noise=None):
+    def p_losses(self, x_start, cond, struct_cond, t, t_ori, z_gt, canny_hint=None, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
 
@@ -2457,7 +2631,7 @@ class LatentDiffusionSRTextWT(DDPM):
                 noise = noise_new * 0.5 + noise * 0.5
                 x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
 
-        model_output = self.apply_model(x_noisy, t_ori, cond, struct_cond)
+        model_output = self.apply_model(x_noisy, t_ori, cond, struct_cond, canny_hint=canny_hint)
 
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
@@ -2501,19 +2675,20 @@ class LatentDiffusionSRTextWT(DDPM):
 
     def p_mean_variance(self, x, c, struct_cond, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False,
                         return_x0=False, score_corrector=None, corrector_kwargs=None, t_replace=None, unconditional_conditioning=None, unconditional_guidance_scale=None,
-                        reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000]):
+                        reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000], canny_hint=None):
         if t_replace is None:
             t_in = t
         else:
             t_in = t_replace
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            model_out = self.apply_model(x, t_in, c, struct_cond, return_ids=return_codebook_ids)
+            model_out = self.apply_model(x, t_in, c, struct_cond, canny_hint=canny_hint, return_ids=return_codebook_ids)
         else:
             x_in = torch.cat([x] * 2)
             t_in_ = torch.cat([t_in] * 2)
             c_in = torch.cat([unconditional_conditioning, c])
-            e_t_uncond, e_t = self.apply_model(x_in, t_in_, c_in, struct_cond, return_ids=False).chunk(2)
+            hint_in = torch.cat([canny_hint] * 2) if canny_hint is not None else None
+            e_t_uncond, e_t = self.apply_model(x_in, t_in_, c_in, struct_cond, canny_hint=hint_in, return_ids=False).chunk(2)
             model_out = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
             return_codebook_ids=False
 
@@ -2730,7 +2905,8 @@ class LatentDiffusionSRTextWT(DDPM):
                  return_codebook_ids=False, quantize_denoised=False, return_x0=False,
                  temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None, t_replace=None,
                  unconditional_conditioning=None, unconditional_guidance_scale=None,
-                 reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000]):
+                 reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
+                 canny_hint=None):
         b, *_, device = *x.shape, x.device
         outputs = self.p_mean_variance(x=x, c=c, struct_cond=struct_cond, t=t, clip_denoised=clip_denoised,
                                        return_codebook_ids=return_codebook_ids,
@@ -2738,7 +2914,8 @@ class LatentDiffusionSRTextWT(DDPM):
                                        return_x0=return_x0,
                                        score_corrector=score_corrector, corrector_kwargs=corrector_kwargs, t_replace=t_replace,
                                        unconditional_conditioning=unconditional_conditioning, unconditional_guidance_scale=unconditional_guidance_scale,
-                                       reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range)
+                                       reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
+                                       canny_hint=canny_hint)
         if return_codebook_ids:
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
@@ -2859,7 +3036,8 @@ class LatentDiffusionSRTextWT(DDPM):
                       log_every_t=None, time_replace=None, adain_fea=None, interfea_path=None,
                       unconditional_conditioning=None,
                       unconditional_guidance_scale=None,
-                      reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000]):
+                      reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
+                      z_canny=None, canny_hint=None):
 
         if not log_every_t:
             log_every_t = self.log_every_t
@@ -2899,12 +3077,12 @@ class LatentDiffusionSRTextWT(DDPM):
                 if start_T is not None:
                     if self.ori_timesteps[i] > start_T:
                          continue
-                struct_cond_input = self.structcond_stage_model(struct_cond, t_replace)
+                struct_cond_input = self.encode_struct_cond(struct_cond, t_replace, z_canny=z_canny)
             else:
                 if start_T is not None:
                     if i > start_T:
                         continue
-                struct_cond_input = self.structcond_stage_model(struct_cond, ts)
+                struct_cond_input = self.encode_struct_cond(struct_cond, ts, z_canny=z_canny)
 
             if interfea_path is not None:
                 batch_list.append(struct_cond_input)
@@ -2914,7 +3092,8 @@ class LatentDiffusionSRTextWT(DDPM):
                                 quantize_denoised=quantize_denoised, t_replace=t_replace,
                                 unconditional_conditioning=unconditional_conditioning,
                                 unconditional_guidance_scale=unconditional_guidance_scale,
-                                reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range)
+                                reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
+                                canny_hint=canny_hint)
 
             if adain_fea is not None:
                 if i < 1:
@@ -3060,6 +3239,7 @@ class LatentDiffusionSRTextWT(DDPM):
                unconditional_conditioning=None,
                unconditional_guidance_scale=None,
                reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
+               z_canny=None, canny_hint=None,
                **kwargs):
 
         if shape is None:
@@ -3070,6 +3250,10 @@ class LatentDiffusionSRTextWT(DDPM):
                 list(map(lambda x: x[:batch_size], cond[key])) for key in cond}
             else:
                 cond = [c[:batch_size] for c in cond] if isinstance(cond, list) else cond[:batch_size]
+        if z_canny is not None:
+            z_canny = z_canny[:batch_size]
+        if canny_hint is not None:
+            canny_hint = canny_hint[:batch_size]
         return self.p_sample_loop(cond,
                                   struct_cond,
                                   shape,
@@ -3078,7 +3262,8 @@ class LatentDiffusionSRTextWT(DDPM):
                                   mask=mask, x0=x0, time_replace=time_replace, adain_fea=adain_fea, interfea_path=interfea_path, start_T=start_T,
                                   unconditional_conditioning=unconditional_conditioning,
                                   unconditional_guidance_scale=unconditional_guidance_scale,
-                                  reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range)
+                                  reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
+                                  z_canny=z_canny, canny_hint=canny_hint)
 
     @torch.no_grad()
     def sample_canvas(self, cond, struct_cond, batch_size=16, return_intermediates=False, x_T=None,
@@ -3127,11 +3312,24 @@ class LatentDiffusionSRTextWT(DDPM):
         use_ddim = ddim_steps is not None
 
         log = dict()
-        z, c_lq, z_gt, x, gt, yrec, xc = self.get_input(batch, self.first_stage_key,
-                                           return_first_stage_outputs=True,
-                                           force_c_encode=True,
-                                           return_original_cond=True,
-                                           bs=N, val=True)
+        out = self.get_input(batch, self.first_stage_key,
+                             return_first_stage_outputs=True,
+                             force_c_encode=True,
+                             return_original_cond=True,
+                             bs=N, val=True)
+        # get_input may return an extra canny tensor when use_hq_canny_cond is enabled
+        canny_hint = None
+        z_canny = None
+        if len(out) == 8:
+            z, c_lq, z_gt, canny_extra, x, gt, yrec, xc = out
+            if getattr(self, 'use_hq_canny_cond', False) and getattr(self, 'canny_controlnet', None) is not None:
+                canny_hint = canny_extra
+            elif getattr(self, 'canny_structcond_stage_model', None) is not None:
+                z_canny = canny_extra
+            else:
+                canny_hint = canny_extra
+        else:
+            z, c_lq, z_gt, x, gt, yrec, xc = out
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
         if self.test_gt:
@@ -3175,7 +3373,11 @@ class LatentDiffusionSRTextWT(DDPM):
                 else:
                     cur_time_step = 1000
 
-                samples, z_denoise_row = self.sample(cond=c, struct_cond=struct_cond, batch_size=N, timesteps=cur_time_step, return_intermediates=True, time_replace=self.time_replace)
+                samples, z_denoise_row = self.sample(
+                    cond=c, struct_cond=struct_cond, batch_size=N, timesteps=cur_time_step,
+                    return_intermediates=True, time_replace=self.time_replace,
+                    z_canny=z_canny, canny_hint=canny_hint,
+                )
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
             if plot_denoise_rows:
@@ -3231,9 +3433,26 @@ class LatentDiffusionSRTextWT(DDPM):
 
     def configure_optimizers(self):
         lr = self.learning_rate
-        params = list(self.model.parameters())
-        params = params + list(self.cond_stage_model.parameters())
-        params = params + list(self.structcond_stage_model.parameters())
+        modules = [self.model, self.cond_stage_model, self.structcond_stage_model]
+        if getattr(self, "canny_structcond_stage_model", None) is not None:
+            modules.append(self.canny_structcond_stage_model)
+        if getattr(self, "canny_controlnet", None) is not None:
+            modules.append(self.canny_controlnet)
+        params = []
+        for module in modules:
+            params.extend(p for p in module.parameters() if p.requires_grad)
+        n_tensors = len(params)
+        n_elements = sum(p.numel() for p in params)
+        print(f"AdamW: {n_tensors} trainable tensors ({n_elements:,} elements)")
+        if getattr(self, "use_hq_canny_cond", False):
+            if getattr(self, "canny_controlnet", None) is not None:
+                cn_tensors = sum(1 for p in self.canny_controlnet.parameters() if p.requires_grad)
+                print(f"  canny_controlnet trainable tensors: {cn_tensors}")
+            elif getattr(self, "canny_structcond_stage_model", None) is not None:
+                canny_tensors = sum(1 for p in self.canny_structcond_stage_model.parameters() if p.requires_grad)
+                print(f"  canny_structcond trainable tensors: {canny_tensors}")
+            lq_tensors = sum(1 for p in self.structcond_stage_model.parameters() if p.requires_grad)
+            print(f"  lq structcond trainable tensors: {lq_tensors}")
         if self.learn_logvar:
             assert not self.learn_logvar
             print('Diffusion model optimizing logvar')
@@ -3346,7 +3565,8 @@ class DiffusionWrapper(pl.LightningModule):
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm']
 
-    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, struct_cond=None, seg_cond=None):
+    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, struct_cond=None, seg_cond=None,
+                canny_control=None, only_mid_canny_control=False):
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
@@ -3355,9 +3575,15 @@ class DiffusionWrapper(pl.LightningModule):
         elif self.conditioning_key == 'crossattn':
             cc = torch.cat(c_crossattn, 1)
             if seg_cond is None:
-                out = self.diffusion_model(x, t, context=cc, struct_cond=struct_cond)
+                out = self.diffusion_model(
+                    x, t, context=cc, struct_cond=struct_cond,
+                    canny_control=canny_control, only_mid_canny_control=only_mid_canny_control,
+                )
             else:
-                out = self.diffusion_model(x, t, context=cc, struct_cond=struct_cond, seg_cond=seg_cond)
+                out = self.diffusion_model(
+                    x, t, context=cc, struct_cond=struct_cond, seg_cond=seg_cond,
+                    canny_control=canny_control, only_mid_canny_control=only_mid_canny_control,
+                )
         elif self.conditioning_key == 'hybrid':
             xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, 1)

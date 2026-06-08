@@ -26,7 +26,7 @@ dependencies:
     - invisible-watermark>=0.1.5
     - streamlit-drawable-canvas==0.8.0
     - torchmetrics==0.6.0
-    - triton
+    # triton 会触发旧 numpy 源码编译失败，可选：conda install xformers -c xformers
     - matplotlib
     - wandb
     - pillow

@@ -65,6 +65,82 @@ def calculate_ssim(im1, im2, border=0, ycbcr=False):
     else:
         raise ValueError('Wrong input image dimensions.')
 
+_MS_SSIM_WEIGHTS = (0.0448, 0.2856, 0.3001, 0.2363, 0.1333)
+
+
+def _ssim_ms_components(img1, img2):
+    """SSIM and contrast sensitivity at one MS-SSIM scale (Gaussian 11x11, same as ssim())."""
+    C1 = (0.01 * 255)**2
+    C2 = (0.03 * 255)**2
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+    kernel = cv2.getGaussianKernel(11, 1.5)
+    window = np.outer(kernel, kernel.transpose())
+
+    mu1 = cv2.filter2D(img1, -1, window)
+    mu2 = cv2.filter2D(img2, -1, window)
+    mu1_sq = mu1**2
+    mu2_sq = mu2**2
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = cv2.filter2D(img1**2, -1, window) - mu1_sq
+    sigma2_sq = cv2.filter2D(img2**2, -1, window) - mu2_sq
+    sigma12 = cv2.filter2D(img1 * img2, -1, window) - mu1_mu2
+    sigma1_sq = np.maximum(sigma1_sq, 0)
+    sigma2_sq = np.maximum(sigma2_sq, 0)
+
+    luminance = (2 * mu1_mu2 + C1) / (mu1_sq + mu2_sq + C1)
+    cs = (2 * sigma12 + C2) / (sigma1_sq + sigma2_sq + C2)
+    return float((luminance * cs).mean()), float(cs.mean())
+
+
+def _downsample2x(img):
+    h, w = img.shape[:2]
+    return cv2.resize(img, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+
+
+def _ms_ssim_single_channel(img1, img2, weights=_MS_SSIM_WEIGHTS):
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+    mssim = 1.0
+    for i, w in enumerate(weights):
+        ssim_val, cs = _ssim_ms_components(img1, img2)
+        if i < len(weights) - 1:
+            mssim *= cs ** w
+            if min(img1.shape[:2]) < 22:
+                break
+            img1 = _downsample2x(img1)
+            img2 = _downsample2x(img2)
+        else:
+            mssim *= ssim_val ** w
+    return float(mssim)
+
+
+def calculate_ms_ssim(im1, im2, border=0, ycbcr=False):
+    '''
+    Multi-scale SSIM (Wang et al.), aligned with calculate_ssim conventions.
+    im1, im2: h x w x c, [0, 255], float or uint8
+    '''
+    if not im1.shape == im2.shape:
+        raise ValueError('Input images must have the same dimensions.')
+
+    if ycbcr:
+        im1 = rgb2ycbcr(im1, True)
+        im2 = rgb2ycbcr(im2, True)
+
+    h, w = im1.shape[:2]
+    im1 = im1[border:h-border, border:w-border]
+    im2 = im2[border:h-border, border:w-border]
+
+    if im1.ndim == 2:
+        return _ms_ssim_single_channel(im1, im2)
+    elif im1.ndim == 3:
+        if im1.shape[2] == 3:
+            scores = [_ms_ssim_single_channel(im1[:, :, c], im2[:, :, c]) for c in range(3)]
+            return float(np.mean(scores))
+        elif im1.shape[2] == 1:
+            return _ms_ssim_single_channel(np.squeeze(im1), np.squeeze(im2))
+    raise ValueError('Wrong input image dimensions.')
+
 def calculate_psnr(im1, im2, border=0, ycbcr=False):
     '''
     PSNR metric.
