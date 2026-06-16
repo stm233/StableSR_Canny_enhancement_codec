@@ -89,6 +89,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--skip-fid", action="store_true")
     parser.add_argument("--skip-lpips", action="store_true")
+    parser.add_argument("--json-out", type=str, default="", help="Save metrics summary to JSON")
     opt = parser.parse_args()
 
     device = torch.device(opt.device if torch.cuda.is_available() else "cpu")
@@ -152,6 +153,28 @@ def main():
     print(f"MS-SSIM(RGB) mean:{float(np.mean(mssims_rgb)):.4f}")
     if lpips_scores:
         print(f"LPIPS mean:     {float(np.mean(lpips_scores)):.4f}  (lower is better)")
+
+    summary = {
+        "matched": len(pairs),
+        "psnr_y_mean": float(np.mean(psnrs_y)),
+        "ssim_y_mean": float(np.mean(ssims_y)),
+        "ms_ssim_y_mean": float(np.mean(mssims_y)),
+        "psnr_rgb_mean": float(np.mean(psnrs_rgb)),
+        "ssim_rgb_mean": float(np.mean(ssims_rgb)),
+        "ms_ssim_rgb_mean": float(np.mean(mssims_rgb)),
+        "lpips_mean": float(np.mean(lpips_scores)) if lpips_scores else None,
+        "gt_dir": opt.gt_dir,
+        "out_dir": opt.out_dir,
+    }
+    if opt.json_out:
+        import json
+        out_path = os.path.abspath(opt.json_out)
+        parent = os.path.dirname(out_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Saved metrics JSON: {out_path}")
 
     if opt.skip_fid:
         return

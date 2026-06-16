@@ -63,6 +63,30 @@ def load_img_tensor(path, size):
     return t.clamp(-1, 1)
 
 
+def load_canny_hint_tensor(path, size, device):
+    """Load pre-compressed/decoded canny PNG as [1,3,H,W] float in [0,1]."""
+    image = Image.open(path).convert("RGB")
+    arr = np.array(image).astype(np.float32) / 255.0
+    t = torch.from_numpy(arr[None].transpose(0, 3, 1, 2))
+    transform = torchvision.transforms.Compose([
+        torchvision.transforms.Resize(size),
+        torchvision.transforms.CenterCrop(size),
+    ])
+    return transform(t).clamp(0, 1).to(device)
+
+
+def resolve_canny_path(canny_dir, fname):
+    canny_path = os.path.join(canny_dir, fname)
+    if os.path.exists(canny_path):
+        return canny_path
+    base = os.path.splitext(fname)[0]
+    for ext in IMAGE_EXTENSIONS:
+        alt = os.path.join(canny_dir, base + ext)
+        if os.path.exists(alt):
+            return alt
+    return None
+
+
 def encode_hq_canny_hint(model, gt_minus1_1, device):
     """Match training: binary OpenCV Canny, 3ch in [0,1] for ControlNet."""
     from ldm.canny_util import compute_binary_canny_tensor
@@ -133,6 +157,12 @@ def main():
     parser.add_argument("--compute_metrics", action="store_true", help="PSNR/SSIM/MS-SSIM vs GT after inference")
     parser.add_argument("--save_canny_vis", action="store_true", help="save canny preview png next to outputs")
     parser.add_argument(
+        "--canny-dir",
+        type=str,
+        default="",
+        help="Use pre-computed canny maps (e.g. HPCM decoded) instead of GT-derived edges",
+    )
+    parser.add_argument(
         "--zero-canny-hint",
         action="store_true",
         help="ablation: use all-zero Canny hint (ControlNet still runs; hint is black)",
@@ -179,6 +209,8 @@ def main():
         print("Ablation: --no-canny (ControlNet disabled)")
     elif opt.zero_canny_hint:
         print("Ablation: --zero-canny-hint (hint = all zeros, ControlNet still runs)")
+    elif opt.canny_dir:
+        print(f"Canny: pre-computed from {opt.canny_dir}, canny_cond_weight={model.canny_cond_weight}")
     else:
         print(f"Canny: GT edges, canny_cond_weight={model.canny_cond_weight}")
 
@@ -218,12 +250,18 @@ def main():
         if not os.path.exists(gt_path):
             print(f"skip (no GT): {f}")
             continue
+        if opt.canny_dir and not opt.no_canny and not opt.zero_canny_hint:
+            canny_path = resolve_canny_path(opt.canny_dir, f)
+            if canny_path is None:
+                print(f"skip (no canny): {f}")
+                continue
         out_png = os.path.join(opt.outdir, os.path.splitext(f)[0] + ".png")
         if os.path.exists(out_png):
             continue
         pairs.append((f, os.path.join(opt.init_img, f), gt_path))
 
-    print(f"HQ Canny inference: {len(pairs)} pairs (LQ + {'no canny' if opt.no_canny else 'GT canny' if not opt.zero_canny_hint else 'zero canny'})")
+    print(f"HQ Canny inference: {len(pairs)} pairs (LQ + "
+          f"{'no canny' if opt.no_canny else 'zero canny' if opt.zero_canny_hint else 'canny-dir' if opt.canny_dir else 'GT canny'})")
     if len(pairs) == 0:
         print("Nothing to run.")
         if opt.compute_metrics:
@@ -260,9 +298,17 @@ def main():
                     canny_hint = None
                     z_canny = None
                     if use_controlnet:
-                        canny_hint = encode_hq_canny_hint(model, gt_image, device)
                         if opt.zero_canny_hint:
+                            canny_hint = encode_hq_canny_hint(model, gt_image, device)
                             canny_hint = torch.zeros_like(canny_hint)
+                        elif opt.canny_dir:
+                            hints = []
+                            for fname, _, _ in batch_pairs:
+                                cp = resolve_canny_path(opt.canny_dir, fname)
+                                hints.append(load_canny_hint_tensor(cp, opt.input_size, device))
+                            canny_hint = torch.cat(hints, dim=0)
+                        else:
+                            canny_hint = encode_hq_canny_hint(model, gt_image, device)
                     elif getattr(model, "canny_structcond_stage_model", None) is not None:
                         z_canny = encode_hq_canny_latent(model, gt_image, device)
 
