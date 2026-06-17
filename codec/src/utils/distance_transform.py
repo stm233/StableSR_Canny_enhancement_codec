@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import torch
-from scipy.ndimage import distance_transform_bf
+
+
+def _l1_dt_opencv(inv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """L1 DT on uint8 inv (edge=0, non-edge=1). Returns dist, row_idx, col_idx."""
+    dist, labels = cv2.distanceTransformWithLabels(
+        inv,
+        cv2.DIST_L1,
+        cv2.DIST_MASK_PRECISE,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    h, w = inv.shape
+    row_idx = np.zeros((h, w), dtype=np.float32)
+    col_idx = np.zeros((h, w), dtype=np.float32)
+
+    seed_y, seed_x = np.where(inv == 0)
+    if seed_y.size == 0:
+        return dist.astype(np.float32), row_idx, col_idx
+
+    valid = labels > 0
+    lid = labels[valid] - 1
+    row_idx[valid] = seed_y[lid]
+    col_idx[valid] = seed_x[lid]
+
+    edge_mask = inv == 0
+    row_idx[edge_mask] = seed_y.astype(np.float32)
+    col_idx[edge_mask] = seed_x.astype(np.float32)
+    return dist.astype(np.float32), row_idx, col_idx
 
 
 def edge_binary_from_tensor(edge: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
@@ -42,13 +69,9 @@ def canny_to_dt_rgb(
         return torch.from_numpy(np.stack([r, g, b], axis=0))
 
     inv = (~edge).astype(np.uint8)
-    dist, indices = distance_transform_bf(
-        inv, metric="cityblock", return_distances=True, return_indices=True
-    )
-    row_idx = indices[0].astype(np.float32)
-    col_idx = indices[1].astype(np.float32)
+    dist, row_idx, col_idx = _l1_dt_opencv(inv)
 
-    r = dist.astype(np.float32) / norm_d
+    r = dist / norm_d
     g = col_idx / norm_x
     b = row_idx / norm_y
     return torch.from_numpy(np.stack([r, g, b], axis=0))

@@ -243,11 +243,14 @@ python codec/scripts/hpcm/create_hqvsr_test500.py \
 
 # 训练 Canny1ch（stdout -> train.log，指标 -> TensorBoard）
 # 前台：
-LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_canny.sh
+CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/00105_epoch_250.tar \
+LAMBDA=0.000005 bash codec/scripts/hpcm/train_hpcm_canny.sh
 
 # 测试 Canny1ch（R=G=B 进，1ch 出，recon/ 二值 Canny）
-CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/epoch_best.pth.tar \
+CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/00105_epoch_250.tar \
+LAMBDA=0.00005 \
   bash codec/scripts/hpcm/test_hqvsr_iframe.sh
+
 
 # 或手动：
 # cd codec && python train.py \
