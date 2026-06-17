@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from src.datasets import IFrameDataset, PFrameDataset
+from utils import psnr_continuous
 
 
 class RateDistortionLoss(nn.Module):
@@ -50,8 +51,7 @@ class RateDistortionLoss(nn.Module):
             target_dist = target
         out["mse_loss"] = self.mse(x_hat, target_dist)
         out["loss"] = self.lmbda * 255**2 * out["mse_loss"] + out["bpp_loss"]
-        mse = out["mse_loss"].clamp(min=1e-10)
-        out["psnr"] = 10 * torch.log10(1.0 / mse)
+        out["psnr"] = psnr_continuous(x_hat, target_dist, peak=255.0)
         return out
 
 

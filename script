@@ -232,40 +232,22 @@ python scripts/plot_canny_codec_sr_rd_curves.py \
   bash scripts/train_hpcm_canny.sh
 
 cd /home/exx/Documents/Tianma/StableSR
-OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/video_pframe_lambda0.00105
-PFRAME_CKPT_DIR="${OUT_ROOT}/checkpoints/HPCM_Video_PFrame_pframe_lmbda0.00105"
-mkdir -p "${OUT_ROOT}/logs"
-LOG_FILE="${OUT_ROOT}/train_pframe_$(date +%Y%m%d_%H%M%S).log"
-echo "P-frame train log: ${LOG_FILE}" | tee "${LOG_FILE}"
-
-# --- 首次训练：从 I-frame canny ckpt 初始化 ref 路径 ---
-INIT_CKPT=/data/Dataset/LIC-HPCM_outputs/train_canny_lambda0.00105/checkpoints/HPCM_Base_lmbda0.00105/epoch_best.pth.tar \
-OUT_ROOT="${OUT_ROOT}" \
-bash codec/scripts/hpcm/train_hpcm_video_pframe.sh 2>&1 | tee -a "${LOG_FILE}"
-
-# --- 断点续训：加载完整 P-frame ckpt（设了 PFRAME_RESUME 就不需要 INIT_CKPT）---
-PFRAME_RESUME="${PFRAME_CKPT_DIR}/epoch_best.pth.tar" \
-OUT_ROOT="${OUT_ROOT}" \
-bash codec/scripts/hpcm/train_hpcm_video_pframe.sh 2>&1 | tee -a "${LOG_FILE}"
 
 
 CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny_lambda0.00105/checkpoints/HPCM_Base_lmbda0.00105/epoch_best.pth.tar \
   bash codec/scripts/hpcm/test_hqvsr_iframe.sh
 
 # ========== Codec 自包含在 StableSR/codec/ ==========
-# bash codec/scripts/setup_codec.sh
-# bash codec/scripts/smoke_test_hpcm.sh
-# LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_canny.sh
-
 python codec/scripts/hpcm/create_hqvsr_test500.py \
   --videos "video1,video2,video3,video4,video5"
 
 # 训练 Canny1ch（stdout -> train.log，指标 -> TensorBoard）
 # 前台：
 LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_canny.sh
-# 后台 + 记 log：
-# nohup env LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_canny.sh > /data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/nohup.out 2>&1 &
-# 看曲线：tensorboard --logdir /data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/logs --port 6006
+
+# 测试 Canny1ch（R=G=B 进，1ch 出，recon/ 二值 Canny）
+CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/epoch_best.pth.tar \
+  bash codec/scripts/hpcm/test_hqvsr_iframe.sh
 
 # 或手动：
 # cd codec && python train.py \

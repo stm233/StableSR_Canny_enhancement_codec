@@ -40,3 +40,17 @@ def crop(x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
         mode="constant",
         value=0,
     )
+
+
+def psnr_continuous(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    peak: float = 255.0,
+) -> torch.Tensor:
+    """
+    pred, target in [0, 1].
+    PSNR = 10 * log10(peak^2 / MSE_peak),  MSE_peak = mean((pred-target)^2) * peak^2.
+    """
+    mse_01 = (pred - target).pow(2).mean()
+    mse_peak = mse_01 * (peak ** 2)
+    return 10 * torch.log10((peak ** 2) / mse_peak.clamp(min=1e-10))

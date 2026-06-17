@@ -109,13 +109,7 @@ class HPCM(basemodel):
         scales_hat = torch.sum(torch.stack(scale_list), dim=0)
 
         if write:
-            y_q_write_list = [
-                self.combine_for_writing_lite(y_q_list[i]) for i in range(len(y_q_list))
-            ]
-            scales_hat_write_list = [
-                self.combine_for_writing_lite(scale_list[i]) for i in range(len(scale_list))
-            ]
-            return y_q_write_list, scales_hat_write_list
+            return y_q_list, scale_list
 
         return y_res, y_q, y_hat, scales_hat
 
@@ -139,18 +133,10 @@ class HPCM(basemodel):
         z_hat = z_res_hat + self.means_hyper
 
         params = self.h_s(z_hat)
-        y_q_write_list, scales_hat_write_list = self.compress_hpcm(y, params)
+        y_q_list, scale_list = self.compress_hpcm(y, params)
 
         encoder_y = ubransEncoder()
-        for i in range(len(y_q_write_list)):
-            indexes_w = self.build_indexes_conditional(scales_hat_write_list[i])
-            self.compress_symbols(
-                y_q_write_list[i], indexes_w,
-                self.quantized_cdf_y.cpu().numpy(),
-                self.cdf_length_y.cpu().numpy(),
-                self.offset_y.cpu().numpy(),
-                encoder_y,
-            )
+        self.compress_y_two_group_lite(y_q_list, scale_list, encoder_y)
         y_string = encoder_y.flush()
         return {"strings": [y_string, z_string], "shape": z_res_hat.size()[2:]}
 
@@ -195,16 +181,9 @@ class HPCM(basemodel):
 
         for i in range(4):
             if i == 0:
-                scales_r = self.combine_for_writing_lite(scales * mask_list[i])
-                indexes_r = self.build_indexes_conditional(scales_r)
-                y_q_r = self.decompress_symbols(
-                    indexes_r,
-                    self.quantized_cdf_y.cpu().numpy(),
-                    self.cdf_length_y.cpu().numpy(),
-                    self.offset_y.cpu().numpy(),
-                    decoder_y,
+                y_hat_curr_step = self.decompress_y_two_group_lite_step(
+                    scales, means, mask_list[i], decoder_y
                 )
-                y_hat_curr_step = (torch.cat([y_q_r for _ in range(2)], dim=1) + means) * mask_list[i]
                 y_hat_so_far = y_hat_curr_step
             else:
                 params = torch.cat((context_next, y_hat_so_far), dim=1)
@@ -214,16 +193,9 @@ class HPCM(basemodel):
                 )
                 context_next = self.attn(context, context_next)
                 scales, means = context.chunk(2, 1)
-                scales_r = self.combine_for_writing_lite(scales * mask_list[i])
-                indexes_r = self.build_indexes_conditional(scales_r)
-                y_q_r = self.decompress_symbols(
-                    indexes_r,
-                    self.quantized_cdf_y.cpu().numpy(),
-                    self.cdf_length_y.cpu().numpy(),
-                    self.offset_y.cpu().numpy(),
-                    decoder_y,
+                y_hat_curr_step = self.decompress_y_two_group_lite_step(
+                    scales, means, mask_list[i], decoder_y
                 )
-                y_hat_curr_step = (torch.cat([y_q_r for _ in range(2)], dim=1) + means) * mask_list[i]
                 y_hat_so_far = y_hat_so_far + y_hat_curr_step
 
         return y_hat_so_far

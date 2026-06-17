@@ -5,32 +5,31 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torchvision.transforms import ToTensor
 
-# Reuse helpers from test.py
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from src.utils.distance_transform import canny_to_dt_rgb  # noqa: E402
+
+from utils import psnr_continuous
+
 from test import (  # noqa: E402
     AverageMeter,
     _save_results,
     _sync,
-    compute_metrics,
     compute_msssim_db,
     crop,
     get_scale_table,
     pad,
-    torch2img,
 )
+
 
 def load_manifest(path: Path) -> list[dict]:
     records = []
@@ -58,10 +57,33 @@ def load_canny_tensor(path: Path) -> torch.Tensor:
 
 
 def load_canny_rgb_tensor(path: Path) -> torch.Tensor:
-    """Legacy 3ch load for HPCM_Base checkpoints."""
+    """R=G=B from L-mode Canny."""
     img = Image.open(path).convert("L")
     t = ToTensor()(img)
     return t.repeat(3, 1, 1).unsqueeze(0)
+
+
+def prepare_codec_input(
+    model_name: str,
+    canny_path: Path,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (codec_input [1,3,H,W], gt_canny [1,1,H,W] float in [0,1])."""
+    edge = load_canny_tensor(canny_path)
+    if model_name == "HPCM_DT1ch":
+        x = canny_to_dt_rgb(edge.squeeze(0)).unsqueeze(0)
+    else:
+        x = load_canny_rgb_tensor(canny_path)
+    return x.to(device), edge.to(device)
+
+
+def metric_target(model_name: str, x: torch.Tensor, gt_canny: torch.Tensor) -> torch.Tensor:
+    """Target for PSNR — same convention as training (continuous, no binarize)."""
+    if model_name == "HPCM_DT1ch":
+        return x[:, :1]
+    if model_name in ("HPCM_Canny1ch", "HPCM_Base_Lite"):
+        return gt_canny
+    return x
 
 
 def select_records(
@@ -115,20 +137,15 @@ def main():
     device = torch.device(args.device)
 
     root = Path(args.dataset_root)
-    manifest = root / args.manifest
-    records = load_manifest(manifest)
+    records = load_manifest(root / args.manifest)
     records = select_records(records, args.val_only, args.val_ratio, args.seed, args.max_images)
     if not records:
         raise RuntimeError("No samples to evaluate.")
 
     results_dir = args.results_dir or args.outdir
-    vis_gt_dir = vis_recon_dir = vis_cmp_dir = None
     if args.outdir:
-        vis_gt_dir = os.path.join(args.outdir, "gt")
-        vis_recon_dir = os.path.join(args.outdir, "recon")
-        vis_cmp_dir = os.path.join(args.outdir, "compare")
-        for d in (args.outdir, vis_gt_dir, vis_recon_dir, vis_cmp_dir):
-            os.makedirs(d, exist_ok=True)
+        for sub in ("gt", "recon", "compare"):
+            os.makedirs(os.path.join(args.outdir, sub), exist_ok=True)
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)
 
@@ -137,11 +154,15 @@ def main():
     net = importlib.import_module(f".{args.model_name}", "src.models").HPCM
     print(f"Loading {args.checkpoint}")
     ckpt = torch.load(args.checkpoint, map_location=device)
-    model = net()
-    model.eval()
+    model = net().eval()
     model.load_state_dict(ckpt, strict=True)
     model.update(get_scale_table(0.12, 64, args.num))
     model = model.to(device)
+
+    print(
+        f"Samples: {len(records)}  device: {device}  model: {args.model_name}\n"
+        "Metrics: continuous [0,1], PSNR = 10*log10(255^2 / MSE_255)"
+    )
 
     bpp_m = AverageMeter()
     psnr_m = AverageMeter()
@@ -152,15 +173,10 @@ def main():
     dec_m = AverageMeter()
     per_image = []
 
-    load_fn = load_canny_rgb_tensor
-    to_img_gt = lambda t: tensor_to_image(t[:, :1, :, :])
-    to_img_recon = tensor_to_image if args.model_name == "HPCM_Canny1ch" else torch2img
-
-    print(f"Samples: {len(records)}  device: {device}")
     for i, rec in enumerate(records):
         canny_path = root / rec["canny"]
         name = Path(rec["canny"]).stem
-        x = load_fn(canny_path).to(device)
+        x, gt_canny = prepare_codec_input(args.model_name, canny_path, device)
         h, w = x.size(2), x.size(3)
         x_pad = pad(x, 256)
 
@@ -179,21 +195,22 @@ def main():
         dec_t = time.time() - t0
 
         x_hat = crop(out_dec["x_hat"], (h, w))
+        target = metric_target(args.model_name, x, gt_canny)
+
+        # PSNR = 10*log10(255^2 / MSE_255), same as training
+        psnr = psnr_continuous(x_hat, target, peak=255.0).item()
+        msssim_db, msssim_metric = compute_msssim_db(x_hat, target, data_range=1.0)
 
         if args.outdir:
-            gt_img = to_img_gt(x)
-            recon_img = to_img_recon(x_hat)
-            gt_img.save(os.path.join(vis_gt_dir, f"{name}.png"))
-            recon_img.save(os.path.join(vis_recon_dir, f"{name}.png"))
-            w, h = gt_img.size
+            gt_img = tensor_to_image(target)
+            recon_img = tensor_to_image(x_hat)
+            gt_img.save(os.path.join(args.outdir, "gt", f"{name}.png"))
+            recon_img.save(os.path.join(args.outdir, "recon", f"{name}.png"))
             cmp_img = Image.new("RGB", (w * 2, h))
-            cmp_img.paste(gt_img, (0, 0))
-            cmp_img.paste(recon_img, (w, 0))
-            cmp_img.save(os.path.join(vis_cmp_dir, f"{name}.png"))
+            cmp_img.paste(gt_img.convert("RGB"), (0, 0))
+            cmp_img.paste(recon_img.convert("RGB"), (w, 0))
+            cmp_img.save(os.path.join(args.outdir, "compare", f"{name}.png"))
 
-        x_gt = x[:, :1, :, :] if x_hat.size(1) == 1 and x.size(1) == 3 else x
-        psnr = compute_metrics(x_gt, x_hat, 255)["psnr"]
-        msssim_db, msssim_metric = compute_msssim_db(x_hat, x_gt, data_range=1.0)
         num_pixels = h * w
         bpp = sum(len(s) for s in out_enc["strings"]) * 8.0 / num_pixels
         ybpp = len(out_enc["strings"][0]) * 8.0 / num_pixels

@@ -54,6 +54,15 @@ def canny_to_dt_rgb(
     return torch.from_numpy(np.stack([r, g, b], axis=0))
 
 
+def _as_hw_numpy(x: torch.Tensor | np.ndarray) -> np.ndarray:
+    """[1,1,H,W] / [1,H,W] / [H,W] -> [H,W] float numpy."""
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    while x.ndim > 2:
+        x = x.squeeze(0)
+    return x
+
+
 def distance_to_edge_uint8(
     dist: torch.Tensor | np.ndarray,
     h: int | None = None,
@@ -62,14 +71,15 @@ def distance_to_edge_uint8(
     tol: float = 0.5,
 ) -> np.ndarray:
     """
-  Decode post-process: distance 0 -> edge white (255), else black (0).
+    DT decoder post-process (R channel only).
 
-  dist: [1,H,W] or [H,W], normalized distance (R channel) if denorm uses H+W scale.
+    Input: normalized L1 distance R_hat = dist / (H+W).
+    Steps: dist_px = R_hat * (H+W); edge pixel iff dist_px <= tol.
+    Output: uint8 Canny — edge white 255, background black 0.
     """
     if isinstance(dist, torch.Tensor):
         dist = dist.detach().cpu().numpy()
-    if dist.ndim == 3:
-        dist = dist.squeeze(0)
+    dist = _as_hw_numpy(dist)
 
     if denorm:
         if h is None or w is None:
@@ -82,6 +92,25 @@ def distance_to_edge_uint8(
     return edge
 
 
+def dt_r_hat_to_canny_uint8(
+    r_hat: torch.Tensor,
+    h: int,
+    w: int,
+    tol_px: float = 0.5,
+) -> np.ndarray:
+    """HPCM_DT1ch: decoder output [1,H,W] is R only -> binary Canny PNG."""
+    return distance_to_edge_uint8(r_hat, h=h, w=w, denorm=True, tol=tol_px)
+
+
 def dt_rgb_to_distance_uint8(rgb: torch.Tensor, h: int, w: int, tol: float = 0.5) -> np.ndarray:
     """GT distance channel -> binary edge PNG (for metric vs original Canny)."""
     return distance_to_edge_uint8(rgb[0], h=h, w=w, denorm=True, tol=tol)
+
+
+def continuous_canny_to_edge_uint8(
+    x: torch.Tensor | np.ndarray,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """Lossy codec output [0,1] -> binary Canny (edge=255, bg=0)."""
+    x = _as_hw_numpy(x)
+    return (x >= threshold).astype(np.uint8) * 255

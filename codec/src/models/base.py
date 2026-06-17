@@ -378,6 +378,29 @@ class BB(nn.Module):
     @staticmethod
     def combine_for_writing_lite(x):
         return sum(x.chunk(2, 1))
+
+    def compress_y_two_group_lite(self, y_q_list, scale_list, encoder_y):
+        """4 checkerboard steps; encode each channel half separately (no sum)."""
+        cdf = self.quantized_cdf_y.cpu().numpy()
+        cdf_len = self.cdf_length_y.cpu().numpy()
+        off = self.offset_y.cpu().numpy()
+        for y_q, s_hat in zip(y_q_list, scale_list):
+            for y_part, s_part in zip(y_q.chunk(2, 1), s_hat.chunk(2, 1)):
+                indexes = self.build_indexes_conditional(s_part)
+                self.compress_symbols(y_part, indexes, cdf, cdf_len, off, encoder_y)
+
+    def decompress_y_two_group_lite_step(self, scales, means, mask, decoder_y):
+        """Inverse of one checkerboard step for two-group lite entropy."""
+        scales_hat = scales * mask
+        parts = []
+        cdf = self.quantized_cdf_y.cpu().numpy()
+        cdf_len = self.cdf_length_y.cpu().numpy()
+        off = self.offset_y.cpu().numpy()
+        for s_part in scales_hat.chunk(2, 1):
+            indexes = self.build_indexes_conditional(s_part)
+            parts.append(self.decompress_symbols(indexes, cdf, cdf_len, off, decoder_y))
+        y_q = torch.cat(parts, dim=1)
+        return y_q + means * mask
     
     def load_state_dict(self, state_dict, strict=True):
         # Old checkpoints saved adaptive_params_list in a plain list (not

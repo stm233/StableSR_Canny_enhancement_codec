@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
 
+from utils import psnr_continuous
 from src.datasets.canny_dataset import CannyRGBDataset
 from src.datasets.dt_canny_dataset import CannyDTDataset
 
@@ -115,8 +116,7 @@ class RateDistortionLoss(nn.Module):
             target_dist = target
         out["mse_loss"] = self.mse(x_hat, target_dist)
         out["loss"] = self.lmbda * 255 ** 2 * out["mse_loss"] + out["bpp_loss"]
-        mse = out["mse_loss"].clamp(min=1e-10)
-        out["psnr"] = 10 * (torch.log(1.0 / mse) / np.log(10))
+        out["psnr"] = psnr_continuous(x_hat, target_dist, peak=255.0)
 
         return out
 

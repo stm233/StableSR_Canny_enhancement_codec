@@ -59,7 +59,9 @@ def torch2img(x: torch.Tensor) -> Image.Image:
     return Image.fromarray(x.permute(1, 2, 0).numpy(), mode="RGB")
 
 def psnr(a: torch.Tensor, b: torch.Tensor, max_val: int = 255):
-    return 20 * math.log10(max_val) - 10 * torch.log10((a - b).pow(2).mean())
+    """PSNR = 10 * log10(max_val^2 / MSE) on max_val scale."""
+    mse = (a - b).pow(2).mean().clamp(min=1e-10)
+    return 10 * math.log10(max_val * max_val / mse)
 
 def compute_metrics(
     org: torch.Tensor, rec: torch.Tensor, max_val: int = 255):
