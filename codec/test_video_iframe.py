@@ -27,6 +27,7 @@ from test import (  # noqa: E402
     AverageMeter,
     _save_results,
     _sync,
+    compute_metrics,
     compute_msssim_db,
     crop,
     get_scale_table,
@@ -103,6 +104,23 @@ def metric_target(model_name: str, x: torch.Tensor, gt_canny: torch.Tensor) -> t
     if model_name in ("HPCM_Canny1ch", "HPCM_Base_Lite"):
         return gt_canny
     return x
+
+
+def compute_dt_canny_psnr(
+    x_hat: torch.Tensor,
+    gt_r: torch.Tensor,
+    gt_canny: torch.Tensor,
+    edge_threshold: float,
+) -> tuple[float, float]:
+    """Return (PSNR on inverted R map, PSNR on binarized edge Canny)."""
+    psnr_dt = psnr_continuous(x_hat, gt_r, peak=255.0).item()
+
+    gt_edge = (gt_canny >= 0.5).float()
+    recon_edge = torch.from_numpy(
+        inverted_r_to_edge_uint8(x_hat, threshold=edge_threshold).astype("float32") / 255.0
+    ).view_as(gt_edge).to(gt_edge.device)
+    psnr_canny = compute_metrics(gt_edge, recon_edge, 255)["psnr"]
+    return psnr_dt, psnr_canny
 
 
 def select_records(
@@ -187,17 +205,19 @@ def main():
     model = model.to(device)
 
     metric_desc = (
-        "inverted R [0,1] (edge=1, bg=distance)"
+        "inverted R PSNR + binarized edge PSNR (R_hat>=thr)"
         if args.model_name == "HPCM_DT1ch"
-        else "continuous [0,1] Canny"
+        else "continuous [0,1] Canny PSNR"
     )
     print(
         f"Samples: {len(records)}  device: {device}  model: {args.model_name}\n"
-        f"Metrics: {metric_desc}, PSNR = 10*log10(255^2 / MSE_255)"
+        f"Metrics: {metric_desc}"
     )
 
     bpp_m = AverageMeter()
     psnr_m = AverageMeter()
+    psnr_dt_m = AverageMeter()
+    psnr_canny_m = AverageMeter()
     msssim_m = AverageMeter()
     y_bpp_m = AverageMeter()
     z_bpp_m = AverageMeter()
@@ -229,7 +249,16 @@ def main():
         x_hat = crop(out_dec["x_hat"], (h, w))
         target = metric_target(args.model_name, x, gt_canny)
 
-        psnr = psnr_continuous(x_hat, target, peak=255.0).item()
+        if args.model_name == "HPCM_DT1ch":
+            psnr_dt, psnr_canny = compute_dt_canny_psnr(
+                x_hat, target, gt_canny, args.edge_threshold
+            )
+            psnr = psnr_dt
+            psnr_dt_m.update(psnr_dt)
+            psnr_canny_m.update(psnr_canny)
+        else:
+            psnr = psnr_continuous(x_hat, target, peak=255.0).item()
+            psnr_canny = psnr
         msssim_db, msssim_metric = compute_msssim_db(x_hat, target, data_range=1.0)
 
         if args.outdir:
@@ -263,6 +292,8 @@ def main():
         per_image.append({
             "image": name,
             "psnr": float(psnr),
+            "psnr_dt": float(psnr_dt) if args.model_name == "HPCM_DT1ch" else float(psnr),
+            "psnr_canny": float(psnr_canny),
             "msssim_db": float(msssim_db),
             "msssim_metric": msssim_metric,
             "bpp": float(bpp),
@@ -273,7 +304,13 @@ def main():
         })
 
         if i % 100 == 0:
-            print(f"[{i}/{len(records)}] {name}  PSNR={psnr:.2f}  bpp={bpp:.4f}")
+            if args.model_name == "HPCM_DT1ch":
+                print(
+                    f"[{i}/{len(records)}] {name}  "
+                    f"PSNR_DT={psnr_dt:.2f}  PSNR_canny={psnr_canny:.2f}  bpp={bpp:.4f}"
+                )
+            else:
+                print(f"[{i}/{len(records)}] {name}  PSNR={psnr:.2f}  bpp={bpp:.4f}")
 
     summary = {
         "psnr": float(psnr_m.avg),
@@ -285,9 +322,18 @@ def main():
         "enc_time": float(enc_m.avg),
         "dec_time": float(dec_m.avg),
     }
+    if args.model_name == "HPCM_DT1ch":
+        summary["psnr_dt"] = float(psnr_dt_m.avg)
+        summary["psnr_canny"] = float(psnr_canny_m.avg)
+        psnr_lines = (
+            f"\n  PSNR (DT / inverted R): {summary['psnr_dt']:.4f}"
+            f"\n  PSNR (Canny edge):      {summary['psnr_canny']:.4f}"
+        )
+    else:
+        psnr_lines = f"\n  PSNR:  {summary['psnr']:.4f}"
     print(
         f"\nHQ-VSR I-frame Test ({len(records)} images):"
-        f"\n  PSNR:  {summary['psnr']:.4f}"
+        f"{psnr_lines}"
         f"\n  MS:    {summary['msssim_db']:.4f}"
         f"\n  bpp:   {summary['bpp']:.6f}"
         f"\n  y bpp: {summary['y_bpp']:.6f}"
