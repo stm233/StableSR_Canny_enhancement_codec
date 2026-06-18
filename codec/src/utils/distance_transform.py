@@ -47,7 +47,7 @@ def canny_to_dt_rgb(
 ) -> torch.Tensor:
     """
     Binary Canny -> 3ch tensor [3, H, W] in [0, 1]:
-      R = L1 distance to nearest edge (normalized by H+W)
+      R = 1.0 on edge; else L1 distance / (H+W)
       G = nearest edge column / (W-1)
       B = nearest edge row / (H-1)
     """
@@ -63,7 +63,7 @@ def canny_to_dt_rgb(
     norm_y = max(h - 1, 1)
 
     if not edge.any():
-        r = np.ones((h, w), dtype=np.float32)
+        r = np.zeros((h, w), dtype=np.float32)
         g = np.zeros((h, w), dtype=np.float32)
         b = np.zeros((h, w), dtype=np.float32)
         return torch.from_numpy(np.stack([r, g, b], axis=0))
@@ -71,7 +71,8 @@ def canny_to_dt_rgb(
     inv = (~edge).astype(np.uint8)
     dist, row_idx, col_idx = _l1_dt_opencv(inv)
 
-    r = dist / norm_d
+    r = dist.astype(np.float32) / norm_d
+    r[edge] = 1.0
     g = col_idx / norm_x
     b = row_idx / norm_y
     return torch.from_numpy(np.stack([r, g, b], axis=0))
@@ -86,6 +87,14 @@ def _as_hw_numpy(x: torch.Tensor | np.ndarray) -> np.ndarray:
     return x
 
 
+def inverted_r_to_edge_uint8(
+    r_hat: torch.Tensor | np.ndarray,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """Inverted R decode: edge=1 on edge pixels, else distance -> edge iff R_hat >= threshold."""
+    return continuous_canny_to_edge_uint8(r_hat, threshold=threshold)
+
+
 def distance_to_edge_uint8(
     dist: torch.Tensor | np.ndarray,
     h: int | None = None,
@@ -94,11 +103,9 @@ def distance_to_edge_uint8(
     tol: float = 0.5,
 ) -> np.ndarray:
     """
-    DT decoder post-process (R channel only).
+    Legacy DT decode (edge=0 encoding): dist_px = R_hat * (H+W); edge iff dist_px <= tol.
 
-    Input: normalized L1 distance R_hat = dist / (H+W).
-    Steps: dist_px = R_hat * (H+W); edge pixel iff dist_px <= tol.
-    Output: uint8 Canny — edge white 255, background black 0.
+    For inverted R (edge=1), use inverted_r_to_edge_uint8 instead.
     """
     if isinstance(dist, torch.Tensor):
         dist = dist.detach().cpu().numpy()
@@ -119,15 +126,18 @@ def dt_r_hat_to_canny_uint8(
     r_hat: torch.Tensor,
     h: int,
     w: int,
+    threshold: float = 0.5,
     tol_px: float = 0.5,
 ) -> np.ndarray:
-    """HPCM_DT1ch: decoder output [1,H,W] is R only -> binary Canny PNG."""
-    return distance_to_edge_uint8(r_hat, h=h, w=w, denorm=True, tol=tol_px)
+    """HPCM_DT1ch: decoder output [1,H,W] inverted R -> binary Canny PNG."""
+    del h, w, tol_px  # inverted R uses threshold only
+    return inverted_r_to_edge_uint8(r_hat, threshold=threshold)
 
 
-def dt_rgb_to_distance_uint8(rgb: torch.Tensor, h: int, w: int, tol: float = 0.5) -> np.ndarray:
-    """GT distance channel -> binary edge PNG (for metric vs original Canny)."""
-    return distance_to_edge_uint8(rgb[0], h=h, w=w, denorm=True, tol=tol)
+def dt_rgb_to_distance_uint8(rgb: torch.Tensor, h: int, w: int, threshold: float = 0.5) -> np.ndarray:
+    """GT inverted R channel -> binary edge PNG."""
+    del h, w
+    return inverted_r_to_edge_uint8(rgb[0], threshold=threshold)
 
 
 def continuous_canny_to_edge_uint8(

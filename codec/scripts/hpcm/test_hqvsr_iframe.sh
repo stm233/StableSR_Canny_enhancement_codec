@@ -16,6 +16,7 @@ MODEL_NAME="${MODEL_NAME:-HPCM_Canny1ch}"
 CHECKPOINT="${CHECKPOINT:-}"
 DEVICE="${DEVICE:-cuda}"
 SAVE_IMAGES="${SAVE_IMAGES:-1}"
+EDGE_THRESHOLD="${EDGE_THRESHOLD:-0.5}"
 
 OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/HQ-VSR_test500_iframe}"
 RESULTS_DIR="${OUT_ROOT}/metrics"
@@ -40,6 +41,8 @@ echo "Device:     ${DEVICE}"
 echo ""
 
 cd "${CODEC_ROOT}"
+extra_dt=()
+[[ "${MODEL_NAME}" == "HPCM_DT1ch" ]] && extra_dt=(--edge-threshold "${EDGE_THRESHOLD}")
 
 "${PYTHON}" test_video_iframe.py \
   --model_name "${MODEL_NAME}" \
@@ -48,8 +51,11 @@ cd "${CODEC_ROOT}"
   --manifest manifest_iframe.jsonl \
   --device "${DEVICE}" \
   --results_dir "${RESULTS_DIR}" \
+  "${extra_dt[@]}" \
   "${extra[@]}" \
   2>&1 | tee "${OUT_ROOT}/test.log"
 
 echo "Results: ${RESULTS_DIR}/results.json"
 [[ "${SAVE_IMAGES}" == "1" ]] && echo "Visuals:  ${IMG_DIR}/gt  ${IMG_DIR}/recon  ${IMG_DIR}/compare"
+[[ "${SAVE_IMAGES}" == "1" && "${MODEL_NAME}" == "HPCM_DT1ch" ]] && \
+  echo "          ${IMG_DIR}/recon_r (inverted R); recon/ = R_hat>=${EDGE_THRESHOLD}"

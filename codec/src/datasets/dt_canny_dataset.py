@@ -16,8 +16,8 @@ class CannyDTDataset(Dataset):
     source='canny_l': load binary Canny from data_dir.
     source='dt_rgb': list files from DT cache dir, load Canny from canny_dir.
 
-    Returns {"input": [3,H,W] DT RGB, "target": [1,H,W] binary Canny}.
-    Loss / decoder target is Canny (not distance R).
+    Returns {"input": [3,H,W] DT RGB, "target": [1,H,W] inverted R channel}.
+    Loss / decoder target is inverted R (edge=1, background=distance).
     """
 
     def __init__(
@@ -62,4 +62,4 @@ class CannyDTDataset(Dataset):
         if self.transform is not None:
             edge = self.transform(edge)
         dt_rgb = canny_to_dt_rgb(edge, threshold=self.edge_threshold)
-        return {"input": dt_rgb, "target": edge}
+        return {"input": dt_rgb, "target": dt_rgb[0:1]}

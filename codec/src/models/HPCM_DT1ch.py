@@ -1,4 +1,4 @@
-"""HPCM DT codec: 3ch DT in (R=L1 dist, G=loc_x, B=loc_y), 1ch Canny out."""
+"""HPCM DT codec: 3ch DT in (R,G,B), 1ch inverted R out (edge=1, bg=distance)."""
 
 from .HPCM_Canny1ch import HPCM, g_s_1ch  # noqa: F401
 

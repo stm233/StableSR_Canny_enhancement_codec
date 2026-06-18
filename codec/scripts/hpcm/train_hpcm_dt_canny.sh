@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/env.sh"
-# Train HPCM_DT1ch: DT 3ch in (R,G,B), decoder outputs Canny; MSE on Canny target.
+# Train HPCM_DT1ch: DT 3ch in; R=1@edge else distance; decoder outputs inverted R.
 #
 # Usage:
 #   LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh

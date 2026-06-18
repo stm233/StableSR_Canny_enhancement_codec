@@ -128,7 +128,7 @@ def parse_args():
 def encode_decode_i(
     model,
     x_dt: torch.Tensor,
-    gt_canny: torch.Tensor,
+    gt_r: torch.Tensor,
     device: torch.device,
 ) -> tuple[torch.Tensor, dict, FrameResult, tuple[int, int]]:
     h, w = x_dt.size(2), x_dt.size(3)
@@ -147,7 +147,7 @@ def encode_decode_i(
     dec_t = time.time() - t0
 
     x_hat = crop(dec["x_hat"], (h, w))
-    psnr = psnr_continuous(x_hat, gt_canny, peak=255.0).item()
+    psnr = psnr_continuous(x_hat, gt_r, peak=255.0).item()
     bpp = bitstream_bpp(enc["strings"], h, w)
     fr = FrameResult(
         video="",
@@ -166,15 +166,17 @@ def encode_decode_i(
 @torch.no_grad()
 def encode_decode_p(
     model,
-    prev_canny_hat: torch.Tensor,
+    prev_r_hat: torch.Tensor,
     curr_canny_path: Path,
     ref_feats: dict,
     device: torch.device,
     frame_idx: int,
 ) -> tuple[torch.Tensor, dict, FrameResult]:
     curr_canny = load_canny_1ch(curr_canny_path).to(device)
+    curr_dt = load_dt_rgb(curr_canny_path).to(device)
+    gt_r = curr_dt[:, 0:1]
 
-    p_in = model.build_p_input_infer(prev_canny_hat, curr_canny)
+    p_in = model.build_p_input_infer(prev_r_hat, curr_canny)
     h, w = p_in.size(2), p_in.size(3)
     p_pad = pad(p_in)
 
@@ -191,7 +193,7 @@ def encode_decode_p(
     dec_t = time.time() - t0
 
     x_hat = crop(dec["x_hat"], (h, w))
-    psnr = psnr_continuous(x_hat, curr_canny, peak=255.0).item()
+    psnr = psnr_continuous(x_hat, gt_r, peak=255.0).item()
     bpp = bitstream_bpp(enc["strings"], h, w)
     fr = FrameResult(
         video="",
@@ -227,27 +229,25 @@ def run_gop(
     gop = GopResult(video=video, gop_idx=gop_idx, num_p=num_p)
 
     x_dt = load_dt_rgb(chunk[0]).to(device)
-    gt_canny = load_canny_1ch(chunk[0]).to(device)
-    prev_canny_hat, ref_feats, fr_i, _ = encode_decode_i(
-        model, x_dt, gt_canny, device
-    )
+    gt_r = x_dt[:, 0:1]
+    prev_r_hat, ref_feats, fr_i, _ = encode_decode_i(model, x_dt, gt_r, device)
     fr_i.video = video
     fr_i.frame_idx = start
     gop.frames.append(fr_i)
 
     if outdir is not None:
         from test_video_iframe import tensor_to_image
-        tensor_to_image(prev_canny_hat).save(outdir / f"{video}_f{start:06d}_I.png")
+        tensor_to_image(prev_r_hat).save(outdir / f"{video}_f{start:06d}_I.png")
 
     for pi, p_path in enumerate(chunk[1:], start=1):
-        prev_canny_hat, ref_feats, fr_p = encode_decode_p(
-            model, prev_canny_hat, p_path, ref_feats, device, start + pi
+        prev_r_hat, ref_feats, fr_p = encode_decode_p(
+            model, prev_r_hat, p_path, ref_feats, device, start + pi
         )
         fr_p.video = video
         gop.frames.append(fr_p)
         if outdir is not None:
             from test_video_iframe import tensor_to_image
-            tensor_to_image(prev_canny_hat).save(outdir / f"{video}_f{start + pi:06d}_P.png")
+            tensor_to_image(prev_r_hat).save(outdir / f"{video}_f{start + pi:06d}_P.png")
 
     return gop
 
