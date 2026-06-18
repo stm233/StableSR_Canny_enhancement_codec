@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
+from src.utils.distance_transform import canny_to_dt_rgb
 
 
 def _load_manifest(manifest_path: Path) -> list[dict]:
@@ -115,6 +115,51 @@ class PFrameDataset(Dataset):
         p_input = torch.cat([prev_canny, prev_canny, curr_canny], dim=0)
         ref_iframe = prev_canny.repeat(3, 1, 1)
         target = curr_canny
+
+        if self.augment is not None:
+            p_input, ref_iframe, target = self.augment([p_input, ref_iframe, target])
+
+        return {
+            "input": p_input,
+            "ref_iframe": ref_iframe,
+            "target": target,
+        }
+
+
+class PFrameDTDataset(Dataset):
+    """P-frame DT1ch: prev/curr Canny L -> DT RGB; target = curr distance (R)."""
+
+    def __init__(
+        self,
+        data_root: str | Path,
+        manifest: str = "manifest_pframe.jsonl",
+        patch_size: tuple[int, int] | int | None = None,
+        train: bool = True,
+    ):
+        self.data_root = Path(data_root)
+        self.records = _load_manifest(self.data_root / manifest)
+        self.patch_size = patch_size
+        self.train = train
+        self.augment = _AugmentCropFlip(patch_size) if train and patch_size else None
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        rec = self.records[idx]
+        prev_canny = _l_to_tensor01(
+            Image.open(self.data_root / _prev_canny_rel(rec)).convert("L")
+        )
+        curr_canny = _l_to_tensor01(
+            Image.open(self.data_root / rec["curr_canny"]).convert("L")
+        )
+
+        prev_dt = canny_to_dt_rgb(prev_canny.squeeze(0))
+        curr_dt = canny_to_dt_rgb(curr_canny.squeeze(0))
+
+        p_input = torch.cat([prev_dt[0:1], prev_dt[1:2], curr_dt[0:1]], dim=0)
+        ref_iframe = prev_dt
+        target = curr_dt[0:1]
 
         if self.augment is not None:
             p_input, ref_iframe, target = self.augment([p_input, ref_iframe, target])

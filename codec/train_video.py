@@ -20,7 +20,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
-from src.datasets import IFrameDataset, PFrameDataset
+from src.datasets import IFrameDataset, PFrameDataset, PFrameDTDataset
 from utils import psnr_continuous
 
 
@@ -169,6 +169,8 @@ def build_datasets(args):
     patch = tuple(args.patch_size)
     if args.stage == "iframe":
         cls = IFrameDataset
+    elif args.model_name == "HPCM_Video_PFrame_DT1ch":
+        cls = PFrameDTDataset
     else:
         cls = PFrameDataset
 
@@ -228,7 +230,10 @@ def parse_args(argv):
 def main(argv):
     args = parse_args(argv)
     if args.model_name is None:
-        args.model_name = "HPCM_Video_PFrame" if args.stage == "pframe" else "HPCM_Canny1ch"
+        if args.stage == "pframe":
+            args.model_name = "HPCM_Video_PFrame_DT1ch"
+        else:
+            args.model_name = "HPCM_Canny1ch"
     print(args)
 
     tag = f"{args.model_name}_{args.stage}_lmbda{args.lmbda}"
@@ -278,7 +283,7 @@ def main(argv):
             target.load_state_dict(ckpt, strict=True)
     elif args.checkpoint or args.p_codec_init:
         target = net.module if isinstance(net, CustomDataParallel) else net
-        if args.model_name == "HPCM_Video_PFrame":
+        if args.model_name in ("HPCM_Video_PFrame", "HPCM_Video_PFrame_DT1ch"):
             if args.checkpoint:
                 print(f"Loading I-frame checkpoint (ref path only): {args.checkpoint}")
                 target.load_iframe_checkpoint(args.checkpoint, map_location=device)

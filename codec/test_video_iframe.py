@@ -16,7 +16,10 @@ from torchvision.transforms import ToTensor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.utils.distance_transform import canny_to_dt_rgb  # noqa: E402
+from src.utils.distance_transform import (  # noqa: E402
+    canny_to_dt_rgb,
+    distance_to_edge_uint8,
+)
 
 from utils import psnr_continuous
 
@@ -47,6 +50,24 @@ def tensor_to_image(x: torch.Tensor) -> Image.Image:
     if t.size(0) == 1:
         return Image.fromarray(t.squeeze(0).numpy(), mode="L")
     return Image.fromarray(t.permute(1, 2, 0).numpy(), mode="RGB")
+
+
+def dt_visual_images(
+    x_hat: torch.Tensor,
+    gt_canny: torch.Tensor,
+    h: int,
+    w: int,
+    dist_tol: float,
+) -> tuple[Image.Image, Image.Image, Image.Image]:
+    """GT binary Canny + recon binary edge + continuous R_hat for debug."""
+    gt_u8 = (gt_canny.squeeze().detach().cpu().numpy() > 0.5).astype("uint8") * 255
+    recon_u8 = distance_to_edge_uint8(x_hat, h=h, w=w, tol=dist_tol)
+    dist_u8 = (x_hat.squeeze().detach().cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
+    return (
+        Image.fromarray(gt_u8, mode="L"),
+        Image.fromarray(recon_u8, mode="L"),
+        Image.fromarray(dist_u8, mode="L"),
+    )
 
 
 def load_canny_tensor(path: Path) -> torch.Tensor:
@@ -127,6 +148,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--outdir", type=str, default="", help="Save visual PNGs under gt/ recon/ compare/")
     p.add_argument("--results_dir", type=str, default="")
+    p.add_argument(
+        "--dist-tol",
+        type=float,
+        default=0.5,
+        help="HPCM_DT1ch: dist_px = R_hat*(H+W) <= tol -> edge 255 in recon/",
+    )
     return p.parse_args()
 
 
@@ -146,6 +173,8 @@ def main():
     if args.outdir:
         for sub in ("gt", "recon", "compare"):
             os.makedirs(os.path.join(args.outdir, sub), exist_ok=True)
+        if args.model_name == "HPCM_DT1ch":
+            os.makedirs(os.path.join(args.outdir, "recon_dist"), exist_ok=True)
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)
 
@@ -202,8 +231,14 @@ def main():
         msssim_db, msssim_metric = compute_msssim_db(x_hat, target, data_range=1.0)
 
         if args.outdir:
-            gt_img = tensor_to_image(target)
-            recon_img = tensor_to_image(x_hat)
+            if args.model_name == "HPCM_DT1ch":
+                gt_img, recon_img, dist_img = dt_visual_images(
+                    x_hat, gt_canny, h, w, args.dist_tol
+                )
+                dist_img.save(os.path.join(args.outdir, "recon_dist", f"{name}.png"))
+            else:
+                gt_img = tensor_to_image(target)
+                recon_img = tensor_to_image(x_hat)
             gt_img.save(os.path.join(args.outdir, "gt", f"{name}.png"))
             recon_img.save(os.path.join(args.outdir, "recon", f"{name}.png"))
             cmp_img = Image.new("RGB", (w * 2, h))

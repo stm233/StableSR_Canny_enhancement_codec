@@ -186,6 +186,32 @@ class HPCM(basemodel):
         x_hat = self.g_s(y_hat).clamp_(0, 1)
         return {"x_hat": x_hat}
 
+    def decompress_with_latent(self, strings, shape):
+        """Decompress bitstream; return x_hat and latent y_hat (before g_s)."""
+        from src.entropy_models import ubransDecoder
+
+        device = self.quantized_cdf_z.device
+        output_size = (1, self.scales_hyper.size(1), *shape)
+        indexes_z = self.build_indexes_z(output_size).to(device)
+
+        decoder_z = ubransDecoder()
+        decoder_z.set_stream(strings[1])
+        z_res_hat = self.decompress_symbols(
+            indexes_z,
+            self.quantized_cdf_z.cpu().numpy(),
+            self.cdf_length_z.cpu().numpy(),
+            self.offset_z.cpu().numpy(),
+            decoder_z,
+        )
+        z_hat = z_res_hat + self.means_hyper
+
+        params = self.h_s(z_hat)
+        decoder_y = ubransDecoder()
+        decoder_y.set_stream(strings[0])
+        y_hat = self.decompress_hpcm(params, decoder_y)
+        x_hat = self.g_s(y_hat).clamp_(0, 1)
+        return {"x_hat": x_hat, "y_hat": y_hat}
+
     def decompress_hpcm(self, common_params, decoder_y):
         scales, means = common_params.chunk(2, 1)
         dtype = means.dtype
