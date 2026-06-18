@@ -52,26 +52,25 @@ def build_datasets(args):
         test_dataset = CannyRGBDataset(args.test_dataset, transform=test_tf)
     elif model == "HPCM_DT1ch":
         dt_source = getattr(args, "dt_source", "canny_l")
-        if dt_source == "dt_rgb":
-            train_tf = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.RandomCrop(args.patch_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
-            ])
-            test_tf = transforms.Compose([transforms.ToTensor()])
-        else:
-            train_tf = transforms.Compose([
-                transforms.RandomCrop(args.patch_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
-            ])
-            test_tf = None
+        train_tf = transforms.Compose([
+            transforms.RandomCrop(args.patch_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+        ])
+        test_tf = None
+        canny_train = getattr(args, "canny_dataset", "") or args.train_dataset
+        canny_test = getattr(args, "canny_test_dataset", "") or args.test_dataset
         train_dataset = CannyDTDataset(
-            args.train_dataset, transform=train_tf, source=dt_source
+            args.train_dataset,
+            transform=train_tf,
+            source=dt_source,
+            canny_dir=canny_train if dt_source == "dt_rgb" else None,
         )
         test_dataset = CannyDTDataset(
-            args.test_dataset, transform=test_tf, source=dt_source
+            args.test_dataset,
+            transform=test_tf,
+            source=dt_source,
+            canny_dir=canny_test if dt_source == "dt_rgb" else None,
         )
     else:
         train_dataset = Dataset(
@@ -109,8 +108,10 @@ class RateDistortionLoss(nn.Module):
         out['y_bpp'] = torch.log(output['likelihoods']['y']).sum() / (-math.log(2) * num_pixels)
         out['z_bpp'] = torch.log(output['likelihoods']['z']).sum() / (-math.log(2) * num_pixels)
         x_hat = output["x_hat"]
-        # 3ch in, 1ch out (distance / canny): MSE on R channel only
-        if x_hat.size(1) == 1 and target.size(1) == 3:
+        if x_hat.size(1) == 1 and target.size(1) == 1:
+            target_dist = target
+        elif x_hat.size(1) == 1 and target.size(1) == 3:
+            # HPCM_Canny1ch: R=G=B repeated canny
             target_dist = target[:, :1, :, :]
         else:
             target_dist = target
@@ -147,8 +148,17 @@ class CustomDataParallel(nn.DataParallel):
         except AttributeError:
             return getattr(self.module, key)
 
+def _unpack_batch(batch, model_name: str, device):
+    if model_name == "HPCM_DT1ch":
+        x = batch["input"].to(device)
+        target = batch["target"].to(device)
+        return x, target
+    x = batch.to(device)
+    return x, x
+
+
 def train_one_epoch(
-    model, criterion, train_dataloader, optimizer, epoch, global_step, clip_max_norm
+    model, criterion, train_dataloader, optimizer, epoch, global_step, clip_max_norm, model_name=""
 ):
     model.train()
     print(model.training)
@@ -161,14 +171,14 @@ def train_one_epoch(
     z_bpp = AverageMeter()
 
     t_start = time.time()
-    for i, d in enumerate(train_dataloader):
+    for i, batch in enumerate(train_dataloader):
 
         global_step+=1
-        d = d.to(device)
+        x, target = _unpack_batch(batch, model_name, device)
         optimizer.zero_grad()
-        out_net = model(d)
+        out_net = model(x)
 
-        out_criterion = criterion(out_net, d)
+        out_criterion = criterion(out_net, target)
         out_criterion["loss"].backward()
         if clip_max_norm > 0:
             total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
@@ -189,7 +199,7 @@ def train_one_epoch(
             t_start = time.time()
             print(
                 f"Train epoch {epoch}: ["
-                f"{i*len(d)}/{len(train_dataloader.dataset)}"
+                f"{i*len(x)}/{len(train_dataloader.dataset)}"
                 f" ({100. * i / len(train_dataloader):.0f}%)]"
                 f"\tLoss: {loss.avg:.4f} |"
                 f"\tMSE loss: {mse_loss.avg:.6f} |"
@@ -204,7 +214,7 @@ def train_one_epoch(
     return global_step
 
 
-def test_epoch(epoch, test_dataloader, model, criterion, writer):
+def test_epoch(epoch, test_dataloader, model, criterion, writer, model_name=""):
     model.eval()
     device = next(model.parameters()).device
 
@@ -216,10 +226,10 @@ def test_epoch(epoch, test_dataloader, model, criterion, writer):
     z_bpp = AverageMeter()
 
     with torch.no_grad():
-        for d in test_dataloader:
-            d = d.to(device)
-            out_net = model(d)
-            out_criterion = criterion(out_net, d)
+        for batch in test_dataloader:
+            x, target = _unpack_batch(batch, model_name, device)
+            out_net = model(x)
+            out_criterion = criterion(out_net, target)
 
             bpp_loss.update(out_criterion["bpp_loss"])
             loss.update(out_criterion["loss"])
@@ -329,6 +339,20 @@ def parse_args(argv):
         default="canny_l",
         help="HPCM_DT1ch: canny_l=on-the-fly DT, dt_rgb=precomputed RGB cache",
     )
+    parser.add_argument(
+        "--canny-dataset",
+        dest="canny_dataset",
+        type=str,
+        default="",
+        help="HPCM_DT1ch dt_rgb: Canny L dir for loss target (train)",
+    )
+    parser.add_argument(
+        "--canny-test-dataset",
+        dest="canny_test_dataset",
+        type=str,
+        default="",
+        help="HPCM_DT1ch dt_rgb: Canny L dir for loss target (test)",
+    )
     args = parser.parse_args(argv)
     return args
 
@@ -414,9 +438,10 @@ def main(argv):
             epoch,
             global_step,
             args.clip_max_norm,
+            args.model_name,
         )
 
-        loss = test_epoch(epoch, test_dataloader, net, criterion, writer)
+        loss = test_epoch(epoch, test_dataloader, net, criterion, writer, args.model_name)
 
         is_best = loss < best_loss
         best_loss = min(loss, best_loss)

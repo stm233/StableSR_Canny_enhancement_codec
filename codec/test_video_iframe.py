@@ -16,10 +16,7 @@ from torchvision.transforms import ToTensor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.utils.distance_transform import (  # noqa: E402
-    canny_to_dt_rgb,
-    distance_to_edge_uint8,
-)
+from src.utils.distance_transform import canny_to_dt_rgb  # noqa: E402
 
 from utils import psnr_continuous
 
@@ -52,24 +49,6 @@ def tensor_to_image(x: torch.Tensor) -> Image.Image:
     return Image.fromarray(t.permute(1, 2, 0).numpy(), mode="RGB")
 
 
-def dt_visual_images(
-    x_hat: torch.Tensor,
-    gt_canny: torch.Tensor,
-    h: int,
-    w: int,
-    dist_tol: float,
-) -> tuple[Image.Image, Image.Image, Image.Image]:
-    """GT binary Canny + recon binary edge + continuous R_hat for debug."""
-    gt_u8 = (gt_canny.squeeze().detach().cpu().numpy() > 0.5).astype("uint8") * 255
-    recon_u8 = distance_to_edge_uint8(x_hat, h=h, w=w, tol=dist_tol)
-    dist_u8 = (x_hat.squeeze().detach().cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
-    return (
-        Image.fromarray(gt_u8, mode="L"),
-        Image.fromarray(recon_u8, mode="L"),
-        Image.fromarray(dist_u8, mode="L"),
-    )
-
-
 def load_canny_tensor(path: Path) -> torch.Tensor:
     """L-mode Canny PNG -> [1, 1, H, W] float in [0,1]."""
     img = Image.open(path).convert("L")
@@ -99,10 +78,8 @@ def prepare_codec_input(
 
 
 def metric_target(model_name: str, x: torch.Tensor, gt_canny: torch.Tensor) -> torch.Tensor:
-    """Target for PSNR — same convention as training (continuous, no binarize)."""
-    if model_name == "HPCM_DT1ch":
-        return x[:, :1]
-    if model_name in ("HPCM_Canny1ch", "HPCM_Base_Lite"):
+    """Target for PSNR — same convention as training."""
+    if model_name in ("HPCM_DT1ch", "HPCM_Canny1ch", "HPCM_Base_Lite"):
         return gt_canny
     return x
 
@@ -148,12 +125,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--outdir", type=str, default="", help="Save visual PNGs under gt/ recon/ compare/")
     p.add_argument("--results_dir", type=str, default="")
-    p.add_argument(
-        "--dist-tol",
-        type=float,
-        default=0.5,
-        help="HPCM_DT1ch: dist_px = R_hat*(H+W) <= tol -> edge 255 in recon/",
-    )
     return p.parse_args()
 
 
@@ -173,8 +144,6 @@ def main():
     if args.outdir:
         for sub in ("gt", "recon", "compare"):
             os.makedirs(os.path.join(args.outdir, sub), exist_ok=True)
-        if args.model_name == "HPCM_DT1ch":
-            os.makedirs(os.path.join(args.outdir, "recon_dist"), exist_ok=True)
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)
 
@@ -190,7 +159,7 @@ def main():
 
     print(
         f"Samples: {len(records)}  device: {device}  model: {args.model_name}\n"
-        "Metrics: continuous [0,1], PSNR = 10*log10(255^2 / MSE_255)"
+        "Metrics: continuous [0,1] Canny, PSNR = 10*log10(255^2 / MSE_255)"
     )
 
     bpp_m = AverageMeter()
@@ -226,19 +195,12 @@ def main():
         x_hat = crop(out_dec["x_hat"], (h, w))
         target = metric_target(args.model_name, x, gt_canny)
 
-        # PSNR = 10*log10(255^2 / MSE_255), same as training
         psnr = psnr_continuous(x_hat, target, peak=255.0).item()
         msssim_db, msssim_metric = compute_msssim_db(x_hat, target, data_range=1.0)
 
         if args.outdir:
-            if args.model_name == "HPCM_DT1ch":
-                gt_img, recon_img, dist_img = dt_visual_images(
-                    x_hat, gt_canny, h, w, args.dist_tol
-                )
-                dist_img.save(os.path.join(args.outdir, "recon_dist", f"{name}.png"))
-            else:
-                gt_img = tensor_to_image(target)
-                recon_img = tensor_to_image(x_hat)
+            gt_img = tensor_to_image(target)
+            recon_img = tensor_to_image(x_hat)
             gt_img.save(os.path.join(args.outdir, "gt", f"{name}.png"))
             recon_img.save(os.path.join(args.outdir, "recon", f"{name}.png"))
             cmp_img = Image.new("RGB", (w * 2, h))

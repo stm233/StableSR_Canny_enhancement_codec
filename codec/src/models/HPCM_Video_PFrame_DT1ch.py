@@ -1,4 +1,7 @@
-"""P-frame video codec on HPCM_DT1ch: temporal f1-f3 from prev decoder, f4 -> context only."""
+"""P-frame video codec on HPCM_DT1ch: temporal f1-f3 from prev decoder, f4 -> context only.
+
+Decoder outputs Canny (1ch); encoder input remains DT 3ch (R,G,B).
+"""
 
 from __future__ import annotations
 
@@ -81,12 +84,12 @@ class HPCM(nn.Module):
         self.iframe_codec.eval()
 
     @staticmethod
-    def _dist_to_dt_rgb(dist_1ch: torch.Tensor) -> torch.Tensor:
-        """[B,1,H,W] distance in [0,1] -> [B,3,H,W] DT RGB (on CPU numpy path inside)."""
+    def _canny_hat_to_dt_rgb(canny_1ch: torch.Tensor) -> torch.Tensor:
+        """[B,1,H,W] Canny in [0,1] -> [B,3,H,W] DT RGB."""
         out = []
-        for b in range(dist_1ch.size(0)):
-            out.append(canny_to_dt_rgb(dist_1ch[b, 0]))
-        return torch.stack(out, dim=0).to(dist_1ch.device, dist_1ch.dtype)
+        for b in range(canny_1ch.size(0)):
+            out.append(canny_to_dt_rgb(canny_1ch[b, 0]))
+        return torch.stack(out, dim=0).to(canny_1ch.device, canny_1ch.dtype)
 
     def _prev_ref_feats(self, ref_dt: torch.Tensor) -> dict[str, torch.Tensor]:
         """Lossy prev I-frame -> decoder multi-scale f1,f2,f3."""
@@ -99,14 +102,14 @@ class HPCM(nn.Module):
         ref_dt: torch.Tensor,
         ref_feats: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """R,G from lossy prev DT; B = curr distance (GT)."""
+        """R,G from lossy prev Canny; third ch = curr GT distance (R)."""
         if not self.use_lossy_ref:
             return p_input_gt
         with torch.no_grad():
             out = self.iframe_codec(ref_dt, training=False)
-            prev_dt_hat = self._dist_to_dt_rgb(out["x_hat"])
-        curr_b = p_input_gt[:, 2:3]
-        return torch.cat([prev_dt_hat[:, 0:1], prev_dt_hat[:, 1:2], curr_b], dim=1)
+            prev_dt_hat = self._canny_hat_to_dt_rgb(out["x_hat"])
+        curr_r = p_input_gt[:, 2:3]
+        return torch.cat([prev_dt_hat[:, 0:1], prev_dt_hat[:, 1:2], curr_r], dim=1)
 
     def _merge_temporal_context(
         self, params: torch.Tensor, ref_feats: dict[str, torch.Tensor]
@@ -156,12 +159,13 @@ class HPCM(nn.Module):
 
     def build_p_input_infer(
         self,
-        prev_dist_hat: torch.Tensor,
+        prev_canny_hat: torch.Tensor,
         curr_canny_1ch: torch.Tensor,
     ) -> torch.Tensor:
-        """Build 3ch encoder input for P-frame infer: R,G from prev dist; B from curr."""
-        prev_dt = self._dist_to_dt_rgb(prev_dist_hat)
-        return torch.cat([prev_dt[:, 0:1], prev_dt[:, 1:2], curr_canny_1ch], dim=1)
+        """Build 3ch encoder input: R,G from lossy prev Canny; third ch = curr GT distance (R)."""
+        prev_dt = self._canny_hat_to_dt_rgb(prev_canny_hat)
+        curr_dt = self._canny_hat_to_dt_rgb(curr_canny_1ch)
+        return torch.cat([prev_dt[:, 0:1], prev_dt[:, 1:2], curr_dt[:, 0:1]], dim=1)
 
     @torch.no_grad()
     def compress_p(

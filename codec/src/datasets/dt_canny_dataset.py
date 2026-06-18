@@ -1,4 +1,4 @@
-"""Dataset: Canny L PNG -> DT RGB (R=dist, G=loc_x, B=loc_y)."""
+"""Dataset: Canny L PNG -> DT RGB encoder input + binary Canny target."""
 
 from __future__ import annotations
 
@@ -7,16 +7,17 @@ import os
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision.transforms import ToTensor
 
 from src.utils.distance_transform import canny_to_dt_rgb
 
 
 class CannyDTDataset(Dataset):
     """
-    source='canny_l': load binary Canny, augment edge, compute DT [3,H,W].
-    source='dt_rgb': load precomputed DT RGB PNG (from prepare_dt_canny_dataset.py).
-    Training loss uses R channel (distance) only.
+    source='canny_l': load binary Canny from data_dir.
+    source='dt_rgb': list files from DT cache dir, load Canny from canny_dir.
+
+    Returns {"input": [3,H,W] DT RGB, "target": [1,H,W] binary Canny}.
+    Loss / decoder target is Canny (not distance R).
     """
 
     def __init__(
@@ -25,8 +26,10 @@ class CannyDTDataset(Dataset):
         transform=None,
         edge_threshold: float = 0.5,
         source: str = "canny_l",
+        canny_dir: str | None = None,
     ):
         self.data_dir = data_path
+        self.canny_dir = canny_dir
         self.transform = transform
         self.edge_threshold = edge_threshold
         self.source = source
@@ -36,6 +39,8 @@ class CannyDTDataset(Dataset):
             if os.path.isfile(os.path.join(self.data_dir, f))
             and f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp"))
         )
+        if self.source == "dt_rgb" and not self.canny_dir:
+            raise ValueError("canny_dir is required when source='dt_rgb'")
 
     def __len__(self):
         return len(self.dataset_list)
@@ -46,19 +51,15 @@ class CannyDTDataset(Dataset):
         t = torch.tensor(list(img.getdata()), dtype=torch.float32).reshape(img.size[1], img.size[0])
         return (t / 255.0).unsqueeze(0)
 
-    def _load_dt_rgb(self, path: str) -> torch.Tensor:
-        img = Image.open(path).convert("RGB")
-        return ToTensor()(img)
-
     def __getitem__(self, idx):
-        path = os.path.join(self.data_dir, self.dataset_list[idx])
+        fname = self.dataset_list[idx]
         if self.source == "dt_rgb":
-            rgb = self._load_dt_rgb(path)
-            if self.transform is not None:
-                rgb = self.transform(rgb)
-            return rgb
+            edge_path = os.path.join(self.canny_dir, fname)
+        else:
+            edge_path = os.path.join(self.data_dir, fname)
 
-        edge = self._load_edge01(path)
+        edge = self._load_edge01(edge_path)
         if self.transform is not None:
             edge = self.transform(edge)
-        return canny_to_dt_rgb(edge, threshold=self.edge_threshold)
+        dt_rgb = canny_to_dt_rgb(edge, threshold=self.edge_threshold)
+        return {"input": dt_rgb, "target": edge}

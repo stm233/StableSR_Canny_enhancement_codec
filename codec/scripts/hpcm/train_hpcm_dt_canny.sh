@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/env.sh"
-# Train HPCM_DT1ch: R=L1 dist, G=loc_x, B=loc_y in; decode distance -> binary edge.
+# Train HPCM_DT1ch: DT 3ch in (R,G,B), decoder outputs Canny; MSE on Canny target.
 #
 # Usage:
 #   LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
@@ -62,11 +62,17 @@ echo "TB log:     ${LOG_DIR}/HPCM_DT1ch_lmbda${LAMBDA}/"
 echo ""
 
 cd "${CODEC_ROOT}"
+canny_args=()
+if [[ "${DT_SOURCE}" == "dt_rgb" ]]; then
+  canny_args=(--canny-dataset "${CANNY_TRAIN}" --canny-test-dataset "${CANNY_TEST}")
+fi
+
 "${PYTHON}" train.py \
   --model_name HPCM_DT1ch \
   --dt-source "${DT_SOURCE}" \
   --train_dataset "${TRAIN_DATA}" \
   --test_dataset "${TEST_DATA}" \
+  "${canny_args[@]}" \
   "${ckpt_args[@]}" \
   --lambda "${LAMBDA}" \
   --batch-size "${BATCH_SIZE}" \

@@ -16,7 +16,6 @@ MODEL_NAME="${MODEL_NAME:-HPCM_Canny1ch}"
 CHECKPOINT="${CHECKPOINT:-}"
 DEVICE="${DEVICE:-cuda}"
 SAVE_IMAGES="${SAVE_IMAGES:-1}"
-DIST_TOL="${DIST_TOL:-0.5}"
 
 OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/HQ-VSR_test500_iframe}"
 RESULTS_DIR="${OUT_ROOT}/metrics"
@@ -41,8 +40,6 @@ echo "Device:     ${DEVICE}"
 echo ""
 
 cd "${CODEC_ROOT}"
-extra_dt=()
-[[ "${MODEL_NAME}" == "HPCM_DT1ch" ]] && extra_dt=(--dist-tol "${DIST_TOL}")
 
 "${PYTHON}" test_video_iframe.py \
   --model_name "${MODEL_NAME}" \
@@ -51,13 +48,8 @@ extra_dt=()
   --manifest manifest_iframe.jsonl \
   --device "${DEVICE}" \
   --results_dir "${RESULTS_DIR}" \
-  "${extra_dt[@]}" \
   "${extra[@]}" \
   2>&1 | tee "${OUT_ROOT}/test.log"
 
 echo "Results: ${RESULTS_DIR}/results.json"
 [[ "${SAVE_IMAGES}" == "1" ]] && echo "Visuals:  ${IMG_DIR}/gt  ${IMG_DIR}/recon  ${IMG_DIR}/compare"
-[[ "${SAVE_IMAGES}" == "1" && "${MODEL_NAME}" == "HPCM_DT1ch" ]] && \
-  echo "          ${IMG_DIR}/recon_dist (continuous R_hat); recon/ = binary Canny"
-[[ "${SAVE_IMAGES}" == "1" && "${MODEL_NAME}" != "HPCM_DT1ch" ]] && \
-  echo "          (continuous [0,1] for Canny1ch)"

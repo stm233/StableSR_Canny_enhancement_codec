@@ -127,7 +127,7 @@ class PFrameDataset(Dataset):
 
 
 class PFrameDTDataset(Dataset):
-    """P-frame DT1ch: prev/curr Canny L -> DT RGB; target = curr distance (R)."""
+    """P-frame DT1ch: prev/curr Canny L -> DT RGB encoder in; target = curr Canny."""
 
     def __init__(
         self,
@@ -159,7 +159,7 @@ class PFrameDTDataset(Dataset):
 
         p_input = torch.cat([prev_dt[0:1], prev_dt[1:2], curr_dt[0:1]], dim=0)
         ref_iframe = prev_dt
-        target = curr_dt[0:1]
+        target = curr_canny
 
         if self.augment is not None:
             p_input, ref_iframe, target = self.augment([p_input, ref_iframe, target])

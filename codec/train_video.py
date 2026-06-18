@@ -45,7 +45,9 @@ class RateDistortionLoss(nn.Module):
             -math.log(2) * num_pixels
         )
         x_hat = output["x_hat"]
-        if x_hat.size(1) == 1 and target.size(1) == 3:
+        if x_hat.size(1) == 1 and target.size(1) == 1:
+            target_dist = target
+        elif x_hat.size(1) == 1 and target.size(1) == 3:
             target_dist = target[:, :1, :, :]
         else:
             target_dist = target

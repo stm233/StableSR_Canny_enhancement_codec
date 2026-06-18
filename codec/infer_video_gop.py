@@ -35,11 +35,10 @@ def load_canny_1ch(path: Path) -> torch.Tensor:
     return ToTensor()(img).unsqueeze(0)
 
 
-def load_dt_rgb(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (dt_rgb [1,3,H,W], gt_dist [1,1,H,W])."""
+def load_dt_rgb(path: Path) -> torch.Tensor:
+    """Return DT RGB encoder input [1,3,H,W] from Canny path."""
     edge = load_canny_1ch(path)
-    dt = canny_to_dt_rgb(edge.squeeze(0)).unsqueeze(0)
-    return dt, dt[:, 0:1]
+    return canny_to_dt_rgb(edge.squeeze(0)).unsqueeze(0)
 
 
 def discover_videos(canny_root: Path) -> dict[str, list[Path]]:
@@ -126,7 +125,12 @@ def parse_args():
 
 
 @torch.no_grad()
-def encode_decode_i(model, x_dt: torch.Tensor, device: torch.device) -> tuple[torch.Tensor, dict, FrameResult, tuple[int, int]]:
+def encode_decode_i(
+    model,
+    x_dt: torch.Tensor,
+    gt_canny: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict, FrameResult, tuple[int, int]]:
     h, w = x_dt.size(2), x_dt.size(3)
     x_pad = pad(x_dt)
 
@@ -143,8 +147,7 @@ def encode_decode_i(model, x_dt: torch.Tensor, device: torch.device) -> tuple[to
     dec_t = time.time() - t0
 
     x_hat = crop(dec["x_hat"], (h, w))
-    gt = x_dt[:, 0:1]
-    psnr = psnr_continuous(x_hat, gt, peak=255.0).item()
+    psnr = psnr_continuous(x_hat, gt_canny, peak=255.0).item()
     bpp = bitstream_bpp(enc["strings"], h, w)
     fr = FrameResult(
         video="",
@@ -163,17 +166,15 @@ def encode_decode_i(model, x_dt: torch.Tensor, device: torch.device) -> tuple[to
 @torch.no_grad()
 def encode_decode_p(
     model,
-    prev_dist: torch.Tensor,
+    prev_canny_hat: torch.Tensor,
     curr_canny_path: Path,
     ref_feats: dict,
     device: torch.device,
     frame_idx: int,
 ) -> tuple[torch.Tensor, dict, FrameResult]:
-    curr_edge = load_canny_1ch(curr_canny_path).to(device)
-    _, gt_dist = load_dt_rgb(curr_canny_path)
-    gt_dist = gt_dist.to(device)
+    curr_canny = load_canny_1ch(curr_canny_path).to(device)
 
-    p_in = model.build_p_input_infer(prev_dist, curr_edge)
+    p_in = model.build_p_input_infer(prev_canny_hat, curr_canny)
     h, w = p_in.size(2), p_in.size(3)
     p_pad = pad(p_in)
 
@@ -190,7 +191,7 @@ def encode_decode_p(
     dec_t = time.time() - t0
 
     x_hat = crop(dec["x_hat"], (h, w))
-    psnr = psnr_continuous(x_hat, gt_dist, peak=255.0).item()
+    psnr = psnr_continuous(x_hat, curr_canny, peak=255.0).item()
     bpp = bitstream_bpp(enc["strings"], h, w)
     fr = FrameResult(
         video="",
@@ -225,26 +226,28 @@ def run_gop(
 
     gop = GopResult(video=video, gop_idx=gop_idx, num_p=num_p)
 
-    x_dt, _ = load_dt_rgb(chunk[0])
-    x_dt = x_dt.to(device)
-    prev_dist, ref_feats, fr_i, _ = encode_decode_i(model, x_dt, device)
+    x_dt = load_dt_rgb(chunk[0]).to(device)
+    gt_canny = load_canny_1ch(chunk[0]).to(device)
+    prev_canny_hat, ref_feats, fr_i, _ = encode_decode_i(
+        model, x_dt, gt_canny, device
+    )
     fr_i.video = video
     fr_i.frame_idx = start
     gop.frames.append(fr_i)
 
     if outdir is not None:
         from test_video_iframe import tensor_to_image
-        tensor_to_image(prev_dist).save(outdir / f"{video}_f{start:06d}_I.png")
+        tensor_to_image(prev_canny_hat).save(outdir / f"{video}_f{start:06d}_I.png")
 
     for pi, p_path in enumerate(chunk[1:], start=1):
-        prev_dist, ref_feats, fr_p = encode_decode_p(
-            model, prev_dist, p_path, ref_feats, device, start + pi
+        prev_canny_hat, ref_feats, fr_p = encode_decode_p(
+            model, prev_canny_hat, p_path, ref_feats, device, start + pi
         )
         fr_p.video = video
         gop.frames.append(fr_p)
         if outdir is not None:
             from test_video_iframe import tensor_to_image
-            tensor_to_image(prev_dist).save(outdir / f"{video}_f{start + pi:06d}_P.png")
+            tensor_to_image(prev_canny_hat).save(outdir / f"{video}_f{start + pi:06d}_P.png")
 
     return gop
 

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Test HPCM_DT1ch: encode DT features, decode distance, post-process to binary edge."""
+"""Test HPCM_DT1ch: DT 3ch in, decode Canny directly."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -17,17 +16,13 @@ from torchvision.transforms import ToTensor
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test import (  # noqa: E402
     AverageMeter,
-    _sync,
     compute_metrics,
     crop,
     get_scale_table,
     pad,
 )
 
-from src.utils.distance_transform import (  # noqa: E402
-    canny_to_dt_rgb,
-    distance_to_edge_uint8,
-)
+from src.utils.distance_transform import canny_to_dt_rgb  # noqa: E402
 
 
 def load_canny_l(path: Path) -> torch.Tensor:
@@ -37,7 +32,7 @@ def load_canny_l(path: Path) -> torch.Tensor:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Test DT edge codec.")
+    p = argparse.ArgumentParser(description="Test DT Canny codec.")
     p.add_argument("--model_name", type=str, default="HPCM_DT1ch")
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--dataset", type=str, required=True, help="Dir of binary Canny PNGs")
@@ -45,7 +40,6 @@ def parse_args():
     p.add_argument("--num", type=int, default=60)
     p.add_argument("--max-images", type=int, default=0)
     p.add_argument("--outdir", type=str, default="")
-    p.add_argument("--dist-tol", type=float, default=0.5, help="Post-process dist px tolerance")
     return p.parse_args()
 
 
@@ -71,7 +65,7 @@ def main():
 
     if args.outdir:
         os.makedirs(args.outdir, exist_ok=True)
-        for sub in ("gt_edge", "recon_edge", "recon_dist", "compare"):
+        for sub in ("gt_edge", "recon_edge", "compare"):
             os.makedirs(os.path.join(args.outdir, sub), exist_ok=True)
 
     bpp_m = AverageMeter()
@@ -86,10 +80,10 @@ def main():
         with torch.no_grad():
             enc = model.compress(x_pad)
             dec = model.decompress(enc["strings"], enc["shape"])
-        dist_hat = crop(dec["x_hat"], (h, w))
+        canny_hat = crop(dec["x_hat"], (h, w))
 
         gt_edge_u8 = (edge.squeeze().numpy() > 0.5).astype(np.uint8) * 255
-        recon_edge_u8 = distance_to_edge_uint8(dist_hat, h=h, w=w, tol=args.dist_tol)
+        recon_edge_u8 = (canny_hat.squeeze().cpu().numpy() >= 0.5).astype(np.uint8) * 255
 
         gt_t = torch.from_numpy(gt_edge_u8.astype(np.float32) / 255.0).view(1, 1, h, w)
         rec_t = torch.from_numpy(recon_edge_u8.astype(np.float32) / 255.0).view(1, 1, h, w)
@@ -108,10 +102,6 @@ def main():
             Image.fromarray(recon_edge_u8, mode="L").save(
                 os.path.join(args.outdir, "recon_edge", f"{name}.png")
             )
-            dist_vis = (dist_hat.squeeze().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-            Image.fromarray(dist_vis, mode="L").save(
-                os.path.join(args.outdir, "recon_dist", f"{name}.png")
-            )
             cmp = Image.new("RGB", (w * 2, h))
             cmp.paste(Image.fromarray(gt_edge_u8, mode="L").convert("RGB"), (0, 0))
             cmp.paste(Image.fromarray(recon_edge_u8, mode="L").convert("RGB"), (w, 0))
@@ -121,8 +111,8 @@ def main():
             print(f"[{i}/{len(files)}] {name}  PSNR={psnr:.2f}  bpp={bpp:.4f}")
 
     print(f"\nDT codec test ({len(files)} images)")
-    print(f"  PSNR (edge): {psnr_m.avg:.4f}")
-    print(f"  bpp:         {bpp_m.avg:.6f}")
+    print(f"  PSNR (canny): {psnr_m.avg:.4f}")
+    print(f"  bpp:          {bpp_m.avg:.6f}")
 
 
 if __name__ == "__main__":
