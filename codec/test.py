@@ -61,14 +61,19 @@ def torch2img(x: torch.Tensor) -> Image.Image:
 def psnr(a: torch.Tensor, b: torch.Tensor, max_val: int = 255):
     """PSNR = 10 * log10(max_val^2 / MSE) on max_val scale."""
     mse = (a - b).pow(2).mean().clamp(min=1e-10)
-    return 10 * math.log10(max_val * max_val / mse)
+    out = (max_val * max_val) / mse
+    if torch.is_tensor(out):
+        return 10 * torch.log10(out)
+    return 10 * math.log10(out)
+
 
 def compute_metrics(
     org: torch.Tensor, rec: torch.Tensor, max_val: int = 255):
     metrics: Dict[str, Any] = {}
     org = (org * max_val).clamp(0, max_val).round()
     rec = (rec * max_val).clamp(0, max_val).round()
-    metrics["psnr"] = psnr(org, rec).item()
+    p = psnr(org, rec)
+    metrics["psnr"] = float(p.detach().item() if torch.is_tensor(p) else p)
     return metrics
 
 

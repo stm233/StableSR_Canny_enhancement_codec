@@ -27,7 +27,6 @@ from test import (  # noqa: E402
     AverageMeter,
     _save_results,
     _sync,
-    compute_metrics,
     compute_msssim_db,
     crop,
     get_scale_table,
@@ -119,7 +118,7 @@ def compute_dt_canny_psnr(
     recon_edge = torch.from_numpy(
         inverted_r_to_edge_uint8(x_hat, threshold=edge_threshold).astype("float32") / 255.0
     ).view_as(gt_edge).to(gt_edge.device)
-    psnr_canny = compute_metrics(gt_edge, recon_edge, 255)["psnr"]
+    psnr_canny = psnr_continuous(recon_edge, gt_edge, peak=255.0).item()
     return psnr_dt, psnr_canny
 
 
