@@ -249,7 +249,7 @@ def main(argv):
     args = parse_args(argv)
     if args.model_name is None:
         if args.stage == "pframe":
-            args.model_name = "HPCM_Video_PFrame_DT1ch"
+            args.model_name = "HPCM_Video_PFrame_Canny1ch"
         else:
             args.model_name = "HPCM_Canny1ch"
     print(args)
@@ -303,7 +303,11 @@ def main(argv):
             target.load_state_dict(ckpt, strict=True)
     elif args.checkpoint or args.p_codec_init:
         target = net.module if isinstance(net, CustomDataParallel) else net
-        if args.model_name in ("HPCM_Video_PFrame", "HPCM_Video_PFrame_DT1ch"):
+        if args.model_name in (
+            "HPCM_Video_PFrame",
+            "HPCM_Video_PFrame_DT1ch",
+            "HPCM_Video_PFrame_Canny1ch",
+        ):
             if args.checkpoint:
                 print(f"Loading I-frame checkpoint (ref path only): {args.checkpoint}")
                 target.load_iframe_checkpoint(args.checkpoint, map_location=device)

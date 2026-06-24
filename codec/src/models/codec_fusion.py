@@ -104,18 +104,18 @@ def iframe_latent_and_feats(
 
 def lossy_iframe_ref_bundle(
     codec: nn.Module,
-    x_dt: torch.Tensor,
+    x: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Single lossy I-frame pass: inverted R_hat [B,1,H,W] + decoder f1/f2/f3."""
+    """Single lossy I-frame pass: x_hat + decoder f1/f2/f3. x is 1ch (Canny1ch) or 3ch (DT)."""
     with torch.no_grad():
-        y = g_a_forward(codec.g_a, x_dt, None, None)
+        y = g_a_forward(codec.g_a, x, None, None)
         z = codec.h_a(y)
         z_res_hat = torch.round(z - codec.means_hyper)
         z_hat = z_res_hat + codec.means_hyper
         params = codec.h_s(z_hat)
         _, _, y_hat, _ = codec.forward_hpcm(y, params, write=False)
-        feats, r_hat = g_s_decode_multiscale(codec.g_s, y_hat, None, None)
-    return r_hat, feats
+        feats, x_hat = g_s_decode_multiscale(codec.g_s, y_hat, None, None)
+    return x_hat, feats
 
 
 def ref_feats_from_latent(

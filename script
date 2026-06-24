@@ -38,12 +38,13 @@ python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
 # Stage 1 inference (DIV2K Val 100) decompressed Images ( 8x SR controlnet canny)
 python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
-  --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000003.ckpt \
+  --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000012.ckpt \
   --vqgan-config configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml \
   --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
-  --init-img /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/lr64/MSE/lambda_0.0018/images \
+  --init-img /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_lr64/MSE/lambda_0.0018/images \
+  --canny-dir /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/canny/MSE/lambda_0.0035/images \
   --gt-img /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512 \
-  --outdir /data/Dataset/StableSR-TestSets/codec/MSE_0.0018_x8_controlnet_canny_new_3 \
+  --outdir /data/Dataset/StableSR-TestSets/codec/MSE_0.0035_x8 \
   --input_size 512 \
   --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
   --compute_metrics --save_canny_vis
@@ -218,10 +219,21 @@ OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00055 \
 bash codec/scripts/hpcm/train_hpcm_canny.sh
 
 CUDA_VISIBLE_DEVICES=0 \
-INIT_CKPT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00055/checkpoints/HPCM_Canny1ch_lmbda0.00055/epoch_best.pth.tar \
+INIT_CKPT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011/checkpoints/HPCM_Canny1ch_lmbda0.00011/epoch_best.pth.tar \
 LAMBDA=0.00011 \
-BATCH_SIZE=96 \
-PATCH_SIZE=256 \
+BATCH_SIZE=32 \
+PATCH_SIZE=384 \
 NUM_WORKERS=16 \
 OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011 \
 bash codec/scripts/hpcm/train_hpcm_canny.sh
+
+
+CUDA_VISIBLE_DEVICES=0 \
+MODEL_NAME=HPCM_Canny1ch \
+CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011/checkpoints/HPCM_Canny1ch_lmbda0.00011/epoch_best.pth.tar \
+DATA_ROOT=/data/Dataset/RealVSR_GT_test_iframe_all \
+OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_canny1ch_11 \
+bash codec/scripts/hpcm/test_hqvsr_iframe.sh \
+  2>&1 | tee /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_canny1ch_m128/test.log
+
+SAVE_IMAGES=0 \

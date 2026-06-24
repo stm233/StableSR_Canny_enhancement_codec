@@ -211,7 +211,8 @@ def main():
 
     for i, rec in enumerate(records):
         canny_path = root / rec["canny"]
-        name = Path(rec["canny"]).stem
+        # Unique across clips: each clip has 00000.png … — stem-only names overwrite on save.
+        name = f"{rec['video']}_{Path(rec['canny']).stem}"
         x, gt_canny = prepare_codec_input(args.model_name, canny_path, device)
         h, w = x.size(2), x.size(3)
         x_pad = pad(x, 256)
