@@ -1,38 +1,6 @@
 tmux attach -t stablesr
 
 
-# HQ Canny finetune (legacy structcond path): loads stablesr_000117 via yaml ckpt_path
-cd /home/exx/Documents/Tianma/StableSR
-python main.py --train \
-  --base configs/stableSRNew/v2-finetune_text_T_512_hqCanny.yaml \
-  --gpus 0,
-
-python scripts/sr_val_ddpm_text_T_vqganfin_old.py \
-  --config configs/stableSRNew/v2-finetune_text_T_512.yaml \
-  --ckpt checkpoints/stablesr_000117.ckpt \
-  --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
-  --init-img /data/Dataset/DIV2K/DIV2K_valid_100_512_128/LR_128 \
-  --outdir /data/Dataset/StableSR-TestSets/outputs_DIV2K_Val100_baseline_step100 \
-  --input_size 512 \
-  --ddpm_steps 100 \
-  --dec_w 0.5 \
-  --colorfix_type adain \
-  --n_samples 1 \
-  --seed 42
-
-python scripts/sr_val_ddpm_text_T_vqganfin_old.py \
-  --config configs/stableSRNew/v2-finetune_text_T_512.yaml \
-  --ckpt checkpoints/stablesr_000117.ckpt \
-  --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
-  --init-img /data/Dataset/DIV2K/DIV2K_valid_100_512_64/LR_64 \
-  --outdir /data/Dataset/StableSR-TestSets/outputs_DIV2K_Val100_baseline_x8 \
-  --input_size 512 \
-  --ddpm_steps 100 \
-  --dec_w 0.5 \
-  --colorfix_type adain \
-  --n_samples 1 \
-  --seed 42
-
 # ========== Stage 1: ControlNet Canny diffusion SR ==========
 python main.py --train \
   --base configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
@@ -41,7 +9,7 @@ python main.py --train \
   --scale_lr False \
   2>&1 | tee logs/train.log
 
-# Stage 1 inference (DIV2K Val 100)
+# Stage 1 inference (DIV2K Val 100) # test for 4x SR controlnet canny
 python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
   --ckpt logs/2026-06-02T01-01-09_stablesr_cn_canny/checkpoints/epoch=000020.ckpt \
@@ -54,6 +22,7 @@ python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
   --compute_metrics --save_canny_vis
 
+# Stage 1 inference (DIV2K Val 100) # test for 8x SR controlnet canny
   python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
   --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000003.ckpt \
@@ -66,6 +35,7 @@ python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
   --compute_metrics --save_canny_vis
 
+# Stage 1 inference (DIV2K Val 100) decompressed Images ( 8x SR controlnet canny)
 python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
   --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000003.ckpt \
@@ -92,6 +62,7 @@ python scripts/visualize_sr_compare.py \
   --draw-boxes \
   --out /data/Dataset/StableSR-TestSets/vis_compare_new3_0802.png
 
+# auto visualize
 python scripts/visualize_sr_compare_auto.py \
   --lq-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_64/LR_64 \
   --gt-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512 \
@@ -103,71 +74,13 @@ python scripts/visualize_sr_compare_auto.py \
   --top-images 25 \
   --device cpu
 
-
-# Canny ablation (DIV2K Val 100): normal vs zero hint vs no ControlNet
-CKPT=logs/2026-06-02T01-01-09_stablesr_cn_canny/checkpoints/epoch=000019.ckpt
-LQ=/data/Dataset/DIV2K/DIV2K_valid_100_512_128/LR_128
-GT=/data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512
-CFG=configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml
-
-python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py --config $CFG --ckpt $CKPT \
-  --init-img $LQ --gt-img $GT \
-  --outdir /data/Dataset/StableSR-TestSets/outputs_DIV2K_Val100_canny_normal \
-  --input_size 512 --ddpm_steps 200 --dec_w 0.5 --colorfix_type adain --compute_metrics
-
-python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py --config $CFG --ckpt $CKPT \
-  --init-img $LQ --gt-img $GT --zero-canny-hint \
-  --outdir /data/Dataset/StableSR-TestSets/outputs_DIV2K_Val100_canny_zero_hint \
-  --input_size 512 --ddpm_steps 200 --dec_w 0.5 --colorfix_type adain --compute_metrics
-
-python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py --config $CFG --ckpt $CKPT \
-  --init-img $LQ --gt-img $GT --no-canny \
-  --outdir /data/Dataset/StableSR-TestSets/outputs_DIV2K_Val100_canny_off \
-  --input_size 512 --ddpm_steps 200 --dec_w 0.5 --colorfix_type adain --compute_metrics
-
+# evaluate metrics
 python scripts/eval_sr_metrics.py \
   --out-dir /data/Dataset/StableSR-TestSets/codec/MSE_0.0018_x8_controlnet_canny_new_3 \
   --gt-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512
 
 
 
-# ========== Stage 2: CFW + Canny (after ControlNet diffusion ckpt) ==========
-# Fusion concat: [LQ enc_fea | Canny hint_block fea | dec_feat]  (n_cond=3)
-# 1a) CFW 数据 — DIV2K Valid 100 试流程（专用 yaml，不动训练配置）:
-# python scripts/generate_vqgan_data.py \
-#   --config configs/stableSRdata/generate_cfw_controlnet_canny_val100.yaml \
-#   --ckpt logs/2026-06-03T16-06-48_stablesr_cn_canny/checkpoints/epoch=000019.ckpt \
-#   --outdir /data/Dataset/CFW_trainingdata_cn_val100 \
-#   --ddpm_steps 50 --max_images 100 --base_i 0 --seed 10000
-# 1b) 全量 CFW 数据（ControlNet + 与训练相同的 GT 根目录）:
-# python scripts/generate_vqgan_data.py \
-#   --config configs/stableSRdata/generate_cfw_controlnet_canny.yaml \
-#   --ckpt logs/2026-06-02T01-01-09_stablesr_cn_canny/checkpoints/epoch=000020.ckpt \
-#   --outdir /data/Dataset/CFW_trainingdata_cn \
-#   --ddpm_steps 200 --base_i 0 --seed 10000
-# 续生成（不覆盖）:
-# python scripts/generate_vqgan_data.py \
-#   --config configs/stableSRdata/generate_cfw_controlnet_canny.yaml \
-#   --ckpt logs/2026-06-02T01-01-09_stablesr_cn_canny/checkpoints/epoch=000020.ckpt \
-#   --outdir /data/Dataset/CFW_trainingdata_cn \
-#   --ddpm_steps 200 --base_i 5000 --max_images 10000 --seed 10001
-
-# 3) Train CFW (only fusion_layer + discriminator; ControlNet frozen for hints):
-python main.py --train \
-  --base configs/autoencoder/autoencoder_kl_64x64x4_resi_canny.yaml \
-  --gpus 0, --name vqgan_cfw_canny --scale_lr False \
-  2>&1 | tee logs/train_cfw_canny.log
-
-# 必须加 --train；否则只初始化 trainer，不会 trainer.fit()
-# resume 会优先合并 logdir/configs/*.yaml（其中 max_epochs 可能仍是 200），
-# 续训请保证 yaml 里 max_epochs > 200，或加：--lightning.trainer.max_epochs 1000
-python main.py --train \
-  --base configs/autoencoder/autoencoder_kl_64x64x4_resi_canny.yaml \
-  --gpus 0, \
-  --resume /home/exx/Documents/Tianma/StableSR/logs/2026-06-03T22-45-46_vqgan_cfw_canny_val100/checkpoints/last.ckpt \
-  --scale_lr False \
-  --no-test True \
-  2>&1 | tee logs/2026-06-03T22-45-46_vqgan_cfw_canny_val100/train_cfw_canny_val100_resume.log
 
 
 # ========== HPCM canny codec train（codec 在 StableSR/codec/）==========
@@ -229,13 +142,16 @@ python scripts/plot_canny_codec_sr_rd_curves.py \
   --out-dir /data/Dataset/StableSR-TestSets/codec_rd/canny_codec_x8/rd_curves \
   --metric msssim
   
-  bash scripts/train_hpcm_canny.sh
+bash scripts/train_hpcm_canny.sh
 
 cd /home/exx/Documents/Tianma/StableSR
 
 
 CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny_lambda0.00105/checkpoints/HPCM_Base_lmbda0.00105/epoch_best.pth.tar \
   bash codec/scripts/hpcm/test_hqvsr_iframe.sh
+
+LAMBDA=0.00105 \
+bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
 
 # ========== Codec 自包含在 StableSR/codec/ ==========
 python codec/scripts/hpcm/create_hqvsr_test500.py \
@@ -246,10 +162,28 @@ python codec/scripts/hpcm/create_hqvsr_test500.py \
 CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/00105_epoch_250.tar \
 LAMBDA=0.000005 bash codec/scripts/hpcm/train_hpcm_canny.sh
 
+# I-frame 训练
+BATCH_SIZE=64 LAMBDA=0.00155 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
+
+
+# 测试（可视化直接是 Canny，无需 DIST_TOL）
+MODEL_NAME=HPCM_DT1ch CHECKPOINT=.../epoch_best.pth.tar \
+  SAVE_IMAGES=1 bash codec/scripts/hpcm/test_hqvsr_iframe.sh
+
 # 测试 Canny1ch（R=G=B 进，1ch 出，recon/ 二值 Canny）
 CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/00105_epoch_250.tar \
-LAMBDA=0.00005 \
+MODEL_NAME=HPCM_DT1ch \
+LAMBDA=0.00105 \
   bash codec/scripts/hpcm/test_hqvsr_iframe.sh
+
+cd /home/exx/Documents/Tianma/StableSR
+
+CHECKPOINT=/home/exx/Documents/Tianma/StableSR/codec/checkpoints/our55_epoch_8.tar \
+MODEL_NAME=HPCM_DT1ch \
+DATA_ROOT=/data/Dataset/MVSR4x_GT_iframe_all \
+OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/MVSR4x_GT_iframe_all \
+SAVE_IMAGES=0 \
+bash codec/scripts/hpcm/test_hqvsr_iframe.sh
 
 
 # 或手动：
@@ -272,3 +206,22 @@ python codec/scripts/hpcm/profile_hpcm_iframe_flops.py --model HPCM_DT1ch
 # LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
 # 可选预计算 DT 缓存: PREPARE_DT=1 LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
 # 测试: cd codec && python test_dt_canny.py --checkpoint ... --dataset /path/to/canny
+
+cd /home/exx/Documents/Tianma/StableSR
+
+CUDA_VISIBLE_DEVICES=0 \
+LAMBDA=0.00055 \
+BATCH_SIZE=96 \
+PATCH_SIZE=256 \
+NUM_WORKERS=12 \
+OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00055 \
+bash codec/scripts/hpcm/train_hpcm_canny.sh
+
+CUDA_VISIBLE_DEVICES=0 \
+INIT_CKPT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00055/checkpoints/HPCM_Canny1ch_lmbda0.00055/epoch_best.pth.tar \
+LAMBDA=0.00011 \
+BATCH_SIZE=96 \
+PATCH_SIZE=256 \
+NUM_WORKERS=16 \
+OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011 \
+bash codec/scripts/hpcm/train_hpcm_canny.sh

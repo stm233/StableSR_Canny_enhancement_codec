@@ -54,3 +54,22 @@ def psnr_continuous(
     mse_01 = (pred - target).pow(2).mean()
     mse_peak = mse_01 * (peak ** 2)
     return 10 * torch.log10((peak ** 2) / mse_peak.clamp(min=1e-10))
+
+
+def compute_dt_canny_psnr(
+    x_hat: torch.Tensor,
+    gt_r: torch.Tensor,
+    gt_canny: torch.Tensor,
+    edge_threshold: float = 0.5,
+) -> tuple[float, float]:
+    """Return (PSNR on inverted R map, PSNR on binarized edge Canny)."""
+    from src.utils.distance_transform import inverted_r_to_edge_uint8
+
+    psnr_dt = psnr_continuous(x_hat, gt_r, peak=255.0).item()
+
+    gt_edge = (gt_canny >= 0.5).float()
+    recon_edge = torch.from_numpy(
+        inverted_r_to_edge_uint8(x_hat, threshold=edge_threshold).astype("float32") / 255.0
+    ).view_as(gt_edge).to(gt_edge.device)
+    psnr_canny = psnr_continuous(recon_edge, gt_edge, peak=255.0).item()
+    return psnr_dt, psnr_canny

@@ -21,7 +21,7 @@ from src.utils.distance_transform import (  # noqa: E402
     inverted_r_to_edge_uint8,
 )
 
-from utils import psnr_continuous
+from utils import psnr_continuous, compute_dt_canny_psnr
 
 from test import (  # noqa: E402
     AverageMeter,
@@ -91,6 +91,8 @@ def prepare_codec_input(
     edge = load_canny_tensor(canny_path)
     if model_name == "HPCM_DT1ch":
         x = canny_to_dt_rgb(edge.squeeze(0)).unsqueeze(0)
+    elif model_name == "HPCM_Canny1ch":
+        x = edge
     else:
         x = load_canny_rgb_tensor(canny_path)
     return x.to(device), edge.to(device)
@@ -103,23 +105,6 @@ def metric_target(model_name: str, x: torch.Tensor, gt_canny: torch.Tensor) -> t
     if model_name in ("HPCM_Canny1ch", "HPCM_Base_Lite"):
         return gt_canny
     return x
-
-
-def compute_dt_canny_psnr(
-    x_hat: torch.Tensor,
-    gt_r: torch.Tensor,
-    gt_canny: torch.Tensor,
-    edge_threshold: float,
-) -> tuple[float, float]:
-    """Return (PSNR on inverted R map, PSNR on binarized edge Canny)."""
-    psnr_dt = psnr_continuous(x_hat, gt_r, peak=255.0).item()
-
-    gt_edge = (gt_canny >= 0.5).float()
-    recon_edge = torch.from_numpy(
-        inverted_r_to_edge_uint8(x_hat, threshold=edge_threshold).astype("float32") / 255.0
-    ).view_as(gt_edge).to(gt_edge.device)
-    psnr_canny = psnr_continuous(recon_edge, gt_edge, peak=255.0).item()
-    return psnr_dt, psnr_canny
 
 
 def select_records(

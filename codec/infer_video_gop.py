@@ -19,7 +19,7 @@ from torchvision.transforms import ToTensor
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.utils.distance_transform import canny_to_dt_rgb  # noqa: E402
-from utils import psnr_continuous  # noqa: E402
+from utils import compute_dt_canny_psnr  # noqa: E402
 from test import (  # noqa: E402
     AverageMeter,
     _save_results,
@@ -67,6 +67,8 @@ class FrameResult:
     frame_idx: int
     frame_type: str
     psnr: float
+    psnr_dt: float
+    psnr_canny: float
     bpp: float
     y_bpp: float
     z_bpp: float
@@ -83,7 +85,7 @@ class GopResult:
 
     @property
     def avg_psnr(self) -> float:
-        return sum(f.psnr for f in self.frames) / max(len(self.frames), 1)
+        return sum(f.psnr_dt for f in self.frames) / max(len(self.frames), 1)
 
     @property
     def avg_bpp(self) -> float:
@@ -119,6 +121,12 @@ def parse_args():
     p.add_argument("--max-gops-per-video", type=int, default=0, help="0 = all GOPs")
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
     p.add_argument("--num", type=int, default=60, help="entropy scale table levels")
+    p.add_argument(
+        "--edge-threshold",
+        type=float,
+        default=0.5,
+        help="R_hat >= threshold -> edge 255 when computing PSNR_canny",
+    )
     p.add_argument("--results-dir", type=str, default="")
     p.add_argument("--outdir", type=str, default="", help="Save recon PNGs")
     return p.parse_args()
@@ -129,7 +137,9 @@ def encode_decode_i(
     model,
     x_dt: torch.Tensor,
     gt_r: torch.Tensor,
+    gt_canny: torch.Tensor,
     device: torch.device,
+    edge_threshold: float,
 ) -> tuple[torch.Tensor, dict, FrameResult, tuple[int, int]]:
     h, w = x_dt.size(2), x_dt.size(3)
     x_pad = pad(x_dt)
@@ -147,13 +157,15 @@ def encode_decode_i(
     dec_t = time.time() - t0
 
     x_hat = crop(dec["x_hat"], (h, w))
-    psnr = psnr_continuous(x_hat, gt_r, peak=255.0).item()
+    psnr_dt, psnr_canny = compute_dt_canny_psnr(x_hat, gt_r, gt_canny, edge_threshold)
     bpp = bitstream_bpp(enc["strings"], h, w)
     fr = FrameResult(
         video="",
         frame_idx=0,
         frame_type="I",
-        psnr=psnr,
+        psnr=psnr_dt,
+        psnr_dt=psnr_dt,
+        psnr_canny=psnr_canny,
         bpp=bpp,
         y_bpp=len(enc["strings"][0]) * 8.0 / (h * w),
         z_bpp=len(enc["strings"][1]) * 8.0 / (h * w),
@@ -171,12 +183,13 @@ def encode_decode_p(
     ref_feats: dict,
     device: torch.device,
     frame_idx: int,
+    edge_threshold: float,
 ) -> tuple[torch.Tensor, dict, FrameResult]:
     curr_canny = load_canny_1ch(curr_canny_path).to(device)
     curr_dt = load_dt_rgb(curr_canny_path).to(device)
     gt_r = curr_dt[:, 0:1]
 
-    p_in = model.build_p_input_infer(prev_r_hat, curr_canny)
+    p_in = model.build_p_input_infer(prev_r_hat, curr_canny, edge_threshold)
     h, w = p_in.size(2), p_in.size(3)
     p_pad = pad(p_in)
 
@@ -193,13 +206,15 @@ def encode_decode_p(
     dec_t = time.time() - t0
 
     x_hat = crop(dec["x_hat"], (h, w))
-    psnr = psnr_continuous(x_hat, gt_r, peak=255.0).item()
+    psnr_dt, psnr_canny = compute_dt_canny_psnr(x_hat, gt_r, curr_canny, edge_threshold)
     bpp = bitstream_bpp(enc["strings"], h, w)
     fr = FrameResult(
         video="",
         frame_idx=frame_idx,
         frame_type="P",
-        psnr=psnr,
+        psnr=psnr_dt,
+        psnr_dt=psnr_dt,
+        psnr_canny=psnr_canny,
         bpp=bpp,
         y_bpp=len(enc["strings"][0]) * 8.0 / (h * w),
         z_bpp=len(enc["strings"][1]) * 8.0 / (h * w),
@@ -217,6 +232,7 @@ def run_gop(
     num_p: int,
     device: torch.device,
     outdir: Path | None,
+    edge_threshold: float,
 ) -> GopResult | None:
     gop_len = 1 + num_p
     start = gop_idx * gop_len
@@ -230,7 +246,10 @@ def run_gop(
 
     x_dt = load_dt_rgb(chunk[0]).to(device)
     gt_r = x_dt[:, 0:1]
-    prev_r_hat, ref_feats, fr_i, _ = encode_decode_i(model, x_dt, gt_r, device)
+    gt_canny = load_canny_1ch(chunk[0]).to(device)
+    prev_r_hat, ref_feats, fr_i, _ = encode_decode_i(
+        model, x_dt, gt_r, gt_canny, device, edge_threshold
+    )
     fr_i.video = video
     fr_i.frame_idx = start
     gop.frames.append(fr_i)
@@ -241,7 +260,13 @@ def run_gop(
 
     for pi, p_path in enumerate(chunk[1:], start=1):
         prev_r_hat, ref_feats, fr_p = encode_decode_p(
-            model, prev_r_hat, p_path, ref_feats, device, start + pi
+            model,
+            prev_r_hat,
+            p_path,
+            ref_feats,
+            device,
+            start + pi,
+            edge_threshold,
         )
         fr_p.video = video
         gop.frames.append(fr_p)
@@ -291,16 +316,20 @@ def main():
     print(
         f"GOP pattern: I + {args.num_p}P  (GOP size = {1 + args.num_p})\n"
         f"Videos: {len(video_names)}  device: {device}\n"
-        f"P-frame ckpt: {args.pframe_checkpoint}"
+        f"P-frame ckpt: {args.pframe_checkpoint}\n"
+        f"Metrics: inverted R PSNR + binarized edge PSNR (R_hat>={args.edge_threshold})"
     )
 
     all_frames: list[FrameResult] = []
     all_gops: list[GopResult] = []
-    psnr_i = AverageMeter()
-    psnr_p = AverageMeter()
+    psnr_i_dt = AverageMeter()
+    psnr_i_canny = AverageMeter()
+    psnr_p_dt = AverageMeter()
+    psnr_p_canny = AverageMeter()
     bpp_i = AverageMeter()
     bpp_p = AverageMeter()
-    gop_psnr = AverageMeter()
+    gop_psnr_dt = AverageMeter()
+    gop_psnr_canny = AverageMeter()
     gop_bpp = AverageMeter()
 
     for vname in video_names:
@@ -310,23 +339,32 @@ def main():
             max_gops = min(max_gops, args.max_gops_per_video)
 
         for gi in range(max_gops):
-            gop = run_gop(model, vname, frames, gi, args.num_p, device, outdir)
+            gop = run_gop(
+                model, vname, frames, gi, args.num_p, device, outdir, args.edge_threshold
+            )
             if gop is None or not gop.frames:
                 continue
             all_gops.append(gop)
-            gop_psnr.update(gop.avg_psnr)
+            gop_psnr_dt.update(gop.avg_psnr)
+            gop_psnr_canny.update(
+                sum(f.psnr_canny for f in gop.frames) / len(gop.frames)
+            )
             gop_bpp.update(gop.avg_bpp)
             for fr in gop.frames:
                 all_frames.append(fr)
                 if fr.frame_type == "I":
-                    psnr_i.update(fr.psnr)
+                    psnr_i_dt.update(fr.psnr_dt)
+                    psnr_i_canny.update(fr.psnr_canny)
                     bpp_i.update(fr.bpp)
                 else:
-                    psnr_p.update(fr.psnr)
+                    psnr_p_dt.update(fr.psnr_dt)
+                    psnr_p_canny.update(fr.psnr_canny)
                     bpp_p.update(fr.bpp)
             print(
                 f"{vname} GOP#{gi}: {len(gop.frames)} frames  "
-                f"PSNR={gop.avg_psnr:.2f}  bpp={gop.avg_bpp:.4f}"
+                f"PSNR_DT={gop.avg_psnr:.2f}  "
+                f"PSNR_canny={sum(f.psnr_canny for f in gop.frames) / len(gop.frames):.2f}  "
+                f"bpp={gop.avg_bpp:.4f}"
             )
 
     summary = {
@@ -335,27 +373,37 @@ def main():
         "videos": len(video_names),
         "gops": len(all_gops),
         "frames": len(all_frames),
-        "psnr_i": float(psnr_i.avg),
-        "psnr_p": float(psnr_p.avg),
+        "edge_threshold": args.edge_threshold,
+        "psnr_i": float(psnr_i_dt.avg),
+        "psnr_i_dt": float(psnr_i_dt.avg),
+        "psnr_i_canny": float(psnr_i_canny.avg),
+        "psnr_p": float(psnr_p_dt.avg),
+        "psnr_p_dt": float(psnr_p_dt.avg),
+        "psnr_p_canny": float(psnr_p_canny.avg),
         "bpp_i": float(bpp_i.avg),
         "bpp_p": float(bpp_p.avg),
-        "gop_psnr_avg": float(gop_psnr.avg),
+        "gop_psnr_avg": float(gop_psnr_dt.avg),
+        "gop_psnr_dt_avg": float(gop_psnr_dt.avg),
+        "gop_psnr_canny_avg": float(gop_psnr_canny.avg),
         "gop_bpp_avg": float(gop_bpp.avg),
     }
     print(
         f"\nGOP Infer ({summary['gops']} GOPs, {summary['frames']} frames):"
-        f"\n  I-frame PSNR: {summary['psnr_i']:.4f}  bpp: {summary['bpp_i']:.6f}"
-        f"\n  P-frame PSNR: {summary['psnr_p']:.4f}  bpp: {summary['bpp_p']:.6f}"
-        f"\n  GOP avg PSNR: {summary['gop_psnr_avg']:.4f}  bpp: {summary['gop_bpp_avg']:.6f}"
+        f"\n  I-frame PSNR_DT: {summary['psnr_i_dt']:.4f}  "
+        f"PSNR_canny: {summary['psnr_i_canny']:.4f}  bpp: {summary['bpp_i']:.6f}"
+        f"\n  P-frame PSNR_DT: {summary['psnr_p_dt']:.4f}  "
+        f"PSNR_canny: {summary['psnr_p_canny']:.4f}  bpp: {summary['bpp_p']:.6f}"
+        f"\n  GOP avg PSNR_DT: {summary['gop_psnr_dt_avg']:.4f}  "
+        f"PSNR_canny: {summary['gop_psnr_canny_avg']:.4f}  bpp: {summary['gop_bpp_avg']:.6f}"
     )
 
     if results_dir:
-        per_frame = [
+        per_image = [
             {
-                "video": f.video,
-                "frame": f.frame_idx,
-                "type": f.frame_type,
-                "psnr": f.psnr,
+                "image": f"{f.video}_f{f.frame_idx:06d}_{f.frame_type}",
+                "psnr": f.psnr_dt,
+                "psnr_dt": f.psnr_dt,
+                "psnr_canny": f.psnr_canny,
                 "bpp": f.bpp,
                 "y_bpp": f.y_bpp,
                 "z_bpp": f.z_bpp,
@@ -364,7 +412,29 @@ def main():
             }
             for f in all_frames
         ]
+        args.model_name = "HPCM_Video_PFrame_DT1ch"
+        args.dataset = str(root)
+        args.checkpoint = args.pframe_checkpoint
+        args.outdir = args.outdir or ""
+        _save_results(results_dir, args, args.pframe_checkpoint, per_image, summary)
+
         out_path = Path(results_dir) / f"gop_infer_numP{args.num_p}.json"
+        per_frame = [
+            {
+                "video": f.video,
+                "frame": f.frame_idx,
+                "type": f.frame_type,
+                "psnr": f.psnr_dt,
+                "psnr_dt": f.psnr_dt,
+                "psnr_canny": f.psnr_canny,
+                "bpp": f.bpp,
+                "y_bpp": f.y_bpp,
+                "z_bpp": f.z_bpp,
+                "enc_time": f.enc_time,
+                "dec_time": f.dec_time,
+            }
+            for f in all_frames
+        ]
         with out_path.open("w", encoding="utf-8") as f:
             json.dump({"summary": summary, "frames": per_frame}, f, indent=2)
         print(f"Saved: {out_path}")

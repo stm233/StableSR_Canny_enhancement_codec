@@ -37,7 +37,7 @@ def main() -> None:
     model = mod.HPCM().eval()
     model.update(get_scale_table(0.12, 64, 60))
 
-    in_ch = 3
+    in_ch = 1 if args.model == "HPCM_Canny1ch" else 3
     x = torch.randn(1, in_ch, args.size, args.size)
     with torch.no_grad():
         macs, params = profile(model, inputs=(x,), verbose=False)

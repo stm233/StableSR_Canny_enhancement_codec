@@ -153,15 +153,19 @@ def _save_results(
         results_dir = os.path.join(results_dir, _ckpt_tag(ckpt))
     os.makedirs(results_dir, exist_ok=True)
 
+    base_fieldnames = [
+        "image", "psnr", "psnr_dt", "psnr_canny", "msssim_db", "msssim_metric",
+        "bpp", "y_bpp", "z_bpp", "enc_time", "dec_time",
+    ]
+    if per_image:
+        extra = [k for k in per_image[0] if k not in base_fieldnames]
+        fieldnames = base_fieldnames + extra
+    else:
+        fieldnames = base_fieldnames
+
     csv_path = os.path.join(results_dir, "per_image.csv")
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "image", "psnr", "msssim_db", "msssim_metric", "bpp", "y_bpp",
-                "z_bpp", "enc_time", "dec_time",
-            ],
-        )
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(per_image)
 
@@ -193,14 +197,22 @@ def _save_results(
             f.write(f"  {k}: {v}\n")
         f.write("\n[Per image]\n")
         for row in per_image:
-            f.write(
+            line = (
                 f"{row['image']}\t"
                 f"PSNR={row['psnr']:.4f}\t"
-                f"MS-SSIM={row['msssim_db']:.4f}\t"
+            )
+            if "psnr_dt" in row:
+                line += f"PSNR_DT={row['psnr_dt']:.4f}\t"
+            if "psnr_canny" in row:
+                line += f"PSNR_canny={row['psnr_canny']:.4f}\t"
+            if "msssim_db" in row:
+                line += f"MS-SSIM={row['msssim_db']:.4f}\t"
+            line += (
                 f"bpp={row['bpp']:.6f}\t"
                 f"enc={row['enc_time']:.4f}s\t"
                 f"dec={row['dec_time']:.4f}s\n"
             )
+            f.write(line)
 
     print(f"Results saved to: {results_dir}")
     print(f"  - {csv_path}")
@@ -270,9 +282,13 @@ def test(args):
         per_image: List[Dict[str, Any]] = []
 
         for img_path in sorted(images_list):
-            
-            img = load_image(img_path)
-            x = img2torch(img)
+
+            if args.model_name == "HPCM_Canny1ch":
+                img = Image.open(img_path).convert("L")
+                x = ToTensor()(img).unsqueeze(0)
+            else:
+                img = load_image(img_path)
+                x = img2torch(img)
             h, w = x.size(2), x.size(3)
             x = x.to(device)
             p = 256
@@ -295,11 +311,16 @@ def test(args):
             x_hat = crop(out_dec["x_hat"], (h,w))
 
             if args.outdir:
-                torch2img(x_hat).save(os.path.join(args.outdir, img_name))
+                if x_hat.size(1) == 1:
+                    u8 = x_hat.squeeze(0).squeeze(0).detach().cpu().clamp(0, 1).mul(255).round().byte()
+                    Image.fromarray(u8.numpy(), mode="L").save(os.path.join(args.outdir, img_name))
+                else:
+                    torch2img(x_hat).save(os.path.join(args.outdir, img_name))
 
-            psnr_img = compute_metrics(x, x_hat, 255)['psnr']
+            target = x[:, :1] if x_hat.size(1) == 1 and x.size(1) == 3 else x
+            psnr_img = compute_metrics(target, x_hat, 255)['psnr']
 
-            msssim_db, msssim_metric = compute_msssim_db(x_hat, x, data_range=1.0)
+            msssim_db, msssim_metric = compute_msssim_db(x_hat, target, data_range=1.0)
 
             num_pixels = h*w
             bpp_img = sum(len(s) for s in out_enc["strings"]) * 8.0 / num_pixels

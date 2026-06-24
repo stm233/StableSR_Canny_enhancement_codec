@@ -12,6 +12,7 @@ DATA_ROOT="${DATA_ROOT:-/data/Dataset/HQ-VSR_processed}"
 PFRAME_CKPT="${PFRAME_CKPT:-/data/Dataset/LIC-HPCM_outputs/video_pframe_dt_lambda0.00105/checkpoints/HPCM_Video_PFrame_DT1ch_lmbda0.00105/epoch_best.pth.tar}"
 IFRAME_CKPT="${IFRAME_CKPT:-}"
 NUM_P="${NUM_P:-7}"
+EDGE_THRESHOLD="${EDGE_THRESHOLD:-0.5}"
 MAX_VIDEOS="${MAX_VIDEOS:-0}"
 MAX_GOPS="${MAX_GOPS_PER_VIDEO:-0}"
 RESULTS_DIR="${RESULTS_DIR:-/data/Dataset/LIC-HPCM_outputs/gop_infer_dt}"
@@ -32,6 +33,7 @@ fi
 echo "GOP: I + ${NUM_P}P"
 echo "Data:  ${DATA_ROOT}"
 echo "Ckpt:  ${PFRAME_CKPT}"
+echo "edge_thr: ${EDGE_THRESHOLD}"
 echo ""
 
 cd "${CODEC_ROOT}"
@@ -40,6 +42,7 @@ cd "${CODEC_ROOT}"
   "${iframe_args[@]}" \
   --dataset-root "${DATA_ROOT}" \
   --num-p "${NUM_P}" \
+  --edge-threshold "${EDGE_THRESHOLD}" \
   --max-videos "${MAX_VIDEOS}" \
   --max-gops-per-video "${MAX_GOPS}" \
   --results-dir "${RESULTS_DIR}" \

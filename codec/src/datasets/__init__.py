@@ -1,3 +1,13 @@
-from .video_codec_dataset import IFrameDataset, PFrameDataset, PFrameDTDataset
+from .video_codec_dataset import (
+    IFrameDataset,
+    PFrameDataset,
+    PFrameDTDataset,
+    PFrameDTCachedDataset,
+)
 
-__all__ = ["IFrameDataset", "PFrameDataset", "PFrameDTDataset"]
+__all__ = [
+    "IFrameDataset",
+    "PFrameDataset",
+    "PFrameDTDataset",
+    "PFrameDTCachedDataset",
+]

@@ -15,7 +15,7 @@ from . import HPCM_DT1ch
 from .codec_fusion import (
     g_a_forward,
     g_s_decode_multiscale,
-    iframe_latent_and_feats,
+    lossy_iframe_ref_bundle,
     ref_feats_from_latent,
 )
 
@@ -95,24 +95,17 @@ class HPCM(nn.Module):
 
     def _prev_ref_feats(self, ref_dt: torch.Tensor) -> dict[str, torch.Tensor]:
         """Lossy prev I-frame -> decoder multi-scale f1,f2,f3."""
-        _, feats = iframe_latent_and_feats(self.iframe_codec, ref_dt)
+        _, feats = lossy_iframe_ref_bundle(self.iframe_codec, ref_dt)
         return feats
 
-    def _build_p_input(
-        self,
-        p_input_gt: torch.Tensor,
-        ref_dt: torch.Tensor,
-        ref_feats: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """R,G from lossy prev inverted R; third ch = curr GT inverted R."""
-        if not self.use_lossy_ref:
-            return p_input_gt
+    def _lossy_prev_from_ref_dt(
+        self, ref_dt: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """One I-frame pass -> prev_r_hat, prev_g_hat, ref_feats."""
         with torch.no_grad():
-            out = self.iframe_codec(ref_dt, training=False)
-            prev_r_hat = out["x_hat"]
+            prev_r_hat, ref_feats = lossy_iframe_ref_bundle(self.iframe_codec, ref_dt)
             prev_g_hat = self._g_from_r_hat(prev_r_hat)
-        curr_r = p_input_gt[:, 2:3]
-        return torch.cat([prev_r_hat, prev_g_hat, curr_r], dim=1)
+        return prev_r_hat, prev_g_hat, ref_feats
 
     def _merge_temporal_context(
         self, params: torch.Tensor, ref_feats: dict[str, torch.Tensor]
@@ -121,13 +114,24 @@ class HPCM(nn.Module):
         return self.context_merge(torch.cat([params, f4], dim=1))
 
     def forward(self, batch: dict, training=None):
-        p_input_gt = batch["input"]
-        ref_dt = batch["ref_iframe"]
+        if "ref_feats" in batch:
+            p_input = batch["input"]
+            ref_feats = batch["ref_feats"]
+        else:
+            p_input_gt = batch["input"]
+            ref_dt = batch["ref_iframe"]
+            if training is None:
+                training = self.training
+            if self.use_lossy_ref:
+                prev_r_hat, prev_g_hat, ref_feats = self._lossy_prev_from_ref_dt(ref_dt)
+                curr_r = p_input_gt[:, 2:3]
+                p_input = torch.cat([prev_r_hat, prev_g_hat, curr_r], dim=1)
+            else:
+                ref_feats = self._prev_ref_feats(ref_dt)
+                p_input = p_input_gt
+
         if training is None:
             training = self.training
-
-        ref_feats = self._prev_ref_feats(ref_dt)
-        p_input = self._build_p_input(p_input_gt, ref_dt, ref_feats)
         codec = self.codec
 
         y = g_a_forward(codec.g_a, p_input, ref_feats, self.fuse)
@@ -164,9 +168,10 @@ class HPCM(nn.Module):
         self,
         prev_r_hat: torch.Tensor,
         curr_canny_1ch: torch.Tensor,
+        edge_threshold: float = 0.5,
     ) -> torch.Tensor:
         """R,G from lossy prev inverted R; third ch = curr GT inverted R."""
-        prev_g_hat = self._g_from_r_hat(prev_r_hat)
+        prev_g_hat = self._g_from_r_hat(prev_r_hat, threshold=edge_threshold)
         curr_dt = canny_to_dt_rgb(curr_canny_1ch.squeeze(0)).unsqueeze(0).to(prev_r_hat.device)
         return torch.cat([prev_r_hat, prev_g_hat, curr_dt[:, 0:1]], dim=1)
 

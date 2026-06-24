@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/env.sh"
-# Train HPCM_Canny1ch as a 1-channel canny codec (lambda=0.00105, canny 512x512 input).
+# Train HPCM_Canny1ch: 1ch Canny in/out, M=N=128 latent (lambda=0.00105, 512² images, 256 patch).
 #
 # Usage:
 #   bash scripts/train_hpcm_canny.sh
@@ -25,6 +25,7 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 EPOCHS="${EPOCHS:-3001}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 PATCH_SIZE="${PATCH_SIZE:-256}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
 
 OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105}"
 SAVE_PATH="${OUT_ROOT}/checkpoints"
@@ -58,6 +59,7 @@ else
 fi
 
 echo "Lambda:     ${LAMBDA}"
+echo "Save every: ${SAVE_INTERVAL} epochs (+ epoch_best)"
 echo "Batch size: ${BATCH_SIZE}"
 echo "Train:      ${CANNY_TRAIN}"
 echo "Test:       ${CANNY_TEST}"
@@ -79,5 +81,6 @@ cd "${CODEC_ROOT}"
   --patch-size "${PATCH_SIZE}" "${PATCH_SIZE}" \
   --save_path "${SAVE_PATH}" \
   --log_dir "${LOG_DIR}" \
+  --save-interval "${SAVE_INTERVAL}" \
   --clip_max_norm 1.0 \
   2>&1 | tee -a "${TRAIN_LOG}"

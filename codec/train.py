@@ -17,7 +17,7 @@ from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
 
 from utils import psnr_continuous
-from src.datasets.canny_dataset import CannyRGBDataset
+from src.datasets.canny_dataset import CannyLDataset, CannyRGBDataset
 from src.datasets.dt_canny_dataset import CannyDTDataset
 
 class Dataset(torch.utils.data.Dataset):
@@ -39,7 +39,7 @@ class Dataset(torch.utils.data.Dataset):
 
 
 def build_datasets(args):
-    """HPCM_Canny1ch / HPCM_DT1ch: 3ch encoder input; legacy RGB for other models."""
+    """HPCM_Canny1ch: 1ch L-mode Canny; HPCM_DT1ch: 3ch DT; legacy RGB for other models."""
     model = getattr(args, "model_name", "")
     if model == "HPCM_Canny1ch":
         train_tf = transforms.Compose([
@@ -48,8 +48,8 @@ def build_datasets(args):
             transforms.RandomVerticalFlip(),
         ])
         test_tf = None
-        train_dataset = CannyRGBDataset(args.train_dataset, transform=train_tf)
-        test_dataset = CannyRGBDataset(args.test_dataset, transform=test_tf)
+        train_dataset = CannyLDataset(args.train_dataset, transform=train_tf)
+        test_dataset = CannyLDataset(args.test_dataset, transform=test_tf)
     elif model == "HPCM_DT1ch":
         dt_source = getattr(args, "dt_source", "canny_l")
         train_tf = transforms.Compose([
@@ -333,6 +333,12 @@ def parse_args(argv):
     )
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
     parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=1000,
+        help="Save checkpoint every N epochs (0 = disable periodic saves)",
+    )
+    parser.add_argument(
         "--dt-source",
         dest="dt_source",
         choices=["canny_l", "dt_rgb"],
@@ -450,7 +456,7 @@ def main(argv):
             print(f"epoch {epoch} is best now!")
             torch.save(net.state_dict(), os.path.join(args.save_path, 'epoch_' +'best' + '.pth.tar'))
 
-        if epoch % 1000 == 0:
+        if args.save_interval > 0 and epoch % args.save_interval == 0:
             torch.save(net.state_dict(), os.path.join(args.save_path, 'epoch_' + str(epoch) + '.pth.tar'))
 
 

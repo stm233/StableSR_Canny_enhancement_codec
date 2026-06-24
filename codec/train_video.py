@@ -20,7 +20,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
-from src.datasets import IFrameDataset, PFrameDataset, PFrameDTDataset
+from src.datasets import IFrameDataset, PFrameDataset, PFrameDTDataset, PFrameDTCachedDataset
 from utils import psnr_continuous
 
 
@@ -85,10 +85,13 @@ def _unpack_batch(batch, stage: str, device: torch.device):
     if stage == "iframe":
         x = batch.to(device)
         return x, x
-    model_batch = {
-        "input": batch["input"].to(device),
-        "ref_iframe": batch["ref_iframe"].to(device),
-    }
+    model_batch = {"input": batch["input"].to(device)}
+    if "ref_feats" in batch:
+        model_batch["ref_feats"] = {
+            k: v.to(device) for k, v in batch["ref_feats"].items()
+        }
+    else:
+        model_batch["ref_iframe"] = batch["ref_iframe"].to(device)
     target = batch["target"].to(device)
     return model_batch, target
 
@@ -171,12 +174,19 @@ def build_datasets(args):
     patch = tuple(args.patch_size)
     if args.stage == "iframe":
         cls = IFrameDataset
+        cls_kwargs = {}
     elif args.model_name == "HPCM_Video_PFrame_DT1ch":
-        cls = PFrameDTDataset
+        if getattr(args, "pframe_cache_dir", ""):
+            cls = PFrameDTCachedDataset
+            cls_kwargs = {"cache_root": args.pframe_cache_dir}
+        else:
+            cls = PFrameDTDataset
+            cls_kwargs = {}
     else:
         cls = PFrameDataset
+        cls_kwargs = {}
 
-    full = cls(args.dataset_root, patch_size=patch, train=True)
+    full = cls(args.dataset_root, patch_size=patch, train=True, **cls_kwargs)
     val_size = max(1, int(len(full) * args.val_ratio))
     train_size = len(full) - val_size
     train_set, val_set = random_split(
@@ -185,8 +195,8 @@ def build_datasets(args):
         generator=torch.Generator().manual_seed(args.seed or 42),
     )
 
-    train_ds = cls(args.dataset_root, patch_size=patch, train=True)
-    val_ds = cls(args.dataset_root, patch_size=None, train=False)
+    train_ds = cls(args.dataset_root, patch_size=patch, train=True, **cls_kwargs)
+    val_ds = cls(args.dataset_root, patch_size=None, train=False, **cls_kwargs)
 
     return Subset(train_ds, train_set.indices), Subset(val_ds, val_set.indices)
 
@@ -223,6 +233,12 @@ def parse_args(argv):
         default="",
         help="Resume full P-frame checkpoint (HPCM_Video_PFrame state_dict)",
     )
+    parser.add_argument(
+        "--pframe-cache-dir",
+        type=str,
+        default="",
+        help="P-frame DT1ch: offline I-frame ref cache from prepare_pframe_ref_cache.py",
+    )
     parser.add_argument("--save-interval", type=int, default=100, help="Save checkpoint every N epochs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cuda", action="store_true", default=True)
@@ -239,6 +255,8 @@ def main(argv):
     print(args)
 
     tag = f"{args.model_name}_{args.stage}_lmbda{args.lmbda}"
+    if getattr(args, "pframe_cache_dir", ""):
+        tag += "_cached"
     args.log_dir = os.path.join(args.log_dir, tag)
     args.save_path = os.path.join(args.save_path, tag)
     os.makedirs(args.log_dir, exist_ok=True)

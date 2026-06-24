@@ -1,23 +1,53 @@
-"""HPCM Canny codec: g_a/h_a/h_s same as HPCM_Base (3ch in), g_s outputs 1ch Canny."""
+"""HPCM Canny codec: 1ch in/out, slim g_a/g_s (32/64/128), M=N=128 latent."""
 
 import torch
 from torch import nn
 
 from .base import BB as basemodel
-from .HPCM_Base import CrossAttentionCell, g_a, h_a, h_s, y_spatial_prior_s1_s2
-from src.layers import PConvRB, conv1x1, deconv2x2_up, deconv4x4_up
+from .HPCM_Base import CrossAttentionCell, y_spatial_prior_s1_s2
+from src.layers import PConvRB, conv1x1, conv2x2_down, conv4x4_down, deconv2x2_up, deconv4x4_up
+
+LATENT_M = 128
+LATENT_N = 128
 
 
-class g_s_1ch(nn.Module):
-    """HPCM_Base.g_s with internal width ÷3 (384→128, 192→64, 96→32), output 1ch."""
+class g_a_1ch(nn.Module):
+    """Encoder: 1 -> 32 -> 64 -> 128 -> M (symmetric to g_s_1ch)."""
 
-    def __init__(self):
+    def __init__(self, M: int = LATENT_M):
         super().__init__()
         mlp_ratio = 4
         partial_ratio = 4
-        C128, C64, C32 = 384 // 3, 192 // 3, 96 // 3  # 128, 64, 32
+        C32, C64, C128 = 32, 64, 128
         self.branch = nn.Sequential(
-            deconv2x2_up(320, C128),
+            conv4x4_down(1, C32),
+            PConvRB(C32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(C32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(C32, C64),
+            PConvRB(C64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(C64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(C64, C128),
+            PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(C128, M),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
+class g_s_1ch(nn.Module):
+    """Decoder: M -> 128 -> 64 -> 32 -> 1."""
+
+    def __init__(self, M: int = LATENT_M):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        C32, C64, C128 = 32, 64, 128
+        self.branch = nn.Sequential(
+            deconv2x2_up(M, C128),
             PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             PConvRB(C128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
@@ -35,17 +65,60 @@ class g_s_1ch(nn.Module):
         return self.branch(x)
 
 
+class h_a_128(nn.Module):
+    """Hyper encoder: M -> 128 -> 128 -> N."""
+
+    def __init__(self, M: int = LATENT_M, N: int = LATENT_N):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        self.branch = nn.Sequential(
+            PConvRB(M, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(M, N),
+            PConvRB(N, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(N, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(N, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(N, N),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
+class h_s_128(nn.Module):
+    """Hyper decoder: N -> 128 -> 128 -> 2*M (scales + means)."""
+
+    def __init__(self, M: int = LATENT_M, N: int = LATENT_N):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        self.branch = nn.Sequential(
+            deconv2x2_up(N, N),
+            PConvRB(N, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(N, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(N, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            deconv2x2_up(N, M * 2),
+            PConvRB(M * 2, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
 class HPCM(basemodel):
-    """3ch Canny in (R=G=B), 1ch Canny out; Lite entropy (4 checkerboard steps)."""
+    """1ch Canny in/out; Lite entropy (4 checkerboard steps); M=N=128."""
 
-    def __init__(self, M=320, N=256):
+    def __init__(self, M: int = LATENT_M, N: int = LATENT_N):
         super().__init__(N)
+        self.M = M
+        self.N = N
 
-        self.g_a = g_a()
-        self.g_s = g_s_1ch()
-        self.h_a = h_a()
-        self.h_s = h_s()
+        self.g_a = g_a_1ch(M)
+        self.g_s = g_s_1ch(M)
+        self.h_a = h_a_128(M, N)
+        self.h_s = h_s_128(M, N)
 
+        ctx_ch = M * 2
         self.y_spatial_prior_adaptor_list = nn.ModuleList(
             conv1x1(3 * M, 3 * M) for _ in range(3)
         )
@@ -54,8 +127,8 @@ class HPCM(basemodel):
             nn.Parameter(torch.ones((1, M * 3, 1, 1)), requires_grad=True)
             for _ in range(3)
         ])
-        self.attn = CrossAttentionCell(320 * 2, 320 * 2, window_size=8, kernel_size=1)
-        self.context_net = conv1x1(2 * M, 2 * M)
+        self.attn = CrossAttentionCell(ctx_ch, ctx_ch, window_size=8, kernel_size=1)
+        self.context_net = conv1x1(ctx_ch, ctx_ch)
 
     def forward(self, x, training=None):
         if training is None:
