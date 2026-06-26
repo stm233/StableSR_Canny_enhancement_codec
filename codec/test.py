@@ -283,7 +283,7 @@ def test(args):
 
         for img_path in sorted(images_list):
 
-            if args.model_name in ("HPCM_Canny1ch", "HPCM_Canny1ch_ME"):
+            if args.model_name in ("HPCM_Canny1ch", "HPCM_Canny1ch_ME", "HPCM_Canny1ch_Spconv"):
                 img = Image.open(img_path).convert("L")
                 x = ToTensor()(img).unsqueeze(0)
             else:

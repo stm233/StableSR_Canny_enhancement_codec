@@ -16,6 +16,7 @@ SUPPORTED_MODELS = (
     "HPCM_Base_Lite",
     "HPCM_Canny1ch",
     "HPCM_Canny1ch_ME",
+    "HPCM_Canny1ch_Spconv",
     "HPCM_DT1ch",
     "HPCM_Large",
     "HPCM_1B",

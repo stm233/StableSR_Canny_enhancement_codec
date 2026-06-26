@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# P-frame on HPCM_Canny1ch_ME (frozen lossy I-frame ref + multi-scale fusion).
+# P-frame on HPCM_Canny1ch_Spconv (frozen lossy I-frame ref + multi-scale fusion).
 source "$(dirname "$0")/env.sh"
 set -euo pipefail
 
 DATA_ROOT="${DATA_ROOT:-/data/Dataset/RealVSR_GT_test_iframe_all}"
-INIT_CKPT="${INIT_CKPT:-/data/Dataset/LIC-HPCM_outputs/train_canny1ch_me_lambda0.00011/checkpoints/HPCM_Canny1ch_ME_lmbda0.00011/epoch_best.pth.tar}"
+INIT_CKPT="${INIT_CKPT:-/data/Dataset/LIC-HPCM_outputs/train_canny1ch_spconv_lambda0.00011/checkpoints/HPCM_Canny1ch_Spconv_lmbda0.00011/epoch_best.pth.tar}"
 LAMBDA="${LAMBDA:-0.00011}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 EPOCHS="${EPOCHS:-300}"
@@ -12,33 +12,20 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-100}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 PATCH_SIZE="${PATCH_SIZE:-256}"
 
-OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/video_pframe_canny1ch_me_lambda${LAMBDA}}"
+OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/video_pframe_canny1ch_spconv_lambda${LAMBDA}}"
 SAVE_PATH="${OUT_ROOT}/checkpoints"
 LOG_DIR="${OUT_ROOT}/logs"
 
 mkdir -p "${SAVE_PATH}" "${LOG_DIR}"
-
-[[ -f "${DATA_ROOT}/manifest_pframe.jsonl" ]] || {
-  echo "Missing ${DATA_ROOT}/manifest_pframe.jsonl"
-  exit 1
-}
+[[ -f "${DATA_ROOT}/manifest_pframe.jsonl" ]] || { echo "Missing manifest_pframe.jsonl"; exit 1; }
 
 ckpt_args=()
-if [[ -n "${INIT_CKPT}" ]]; then
-  [[ -f "${INIT_CKPT}" ]] || { echo "Missing I-frame ckpt: ${INIT_CKPT}"; exit 1; }
-  ckpt_args=(--checkpoint "${INIT_CKPT}")
-fi
-
-echo "Model:  HPCM_Video_PFrame_Canny1ch_ME"
-echo "Lambda: ${LAMBDA}"
-echo "Data:   ${DATA_ROOT}"
-echo "Save:   ${SAVE_PATH}"
-echo ""
+[[ -n "${INIT_CKPT}" && -f "${INIT_CKPT}" ]] && ckpt_args=(--checkpoint "${INIT_CKPT}")
 
 cd "${CODEC_ROOT}"
 "${PYTHON}" train_video.py \
   --stage pframe \
-  --model_name HPCM_Video_PFrame_Canny1ch_ME \
+  --model_name HPCM_Video_PFrame_Canny1ch_Spconv \
   --dataset-root "${DATA_ROOT}" \
   "${ckpt_args[@]}" \
   --lambda "${LAMBDA}" \

@@ -102,6 +102,7 @@ def parse_args():
             "HPCM_Video_PFrame_DT1ch",
             "HPCM_Video_PFrame_Canny1ch",
             "HPCM_Video_PFrame_Canny1ch_ME",
+            "HPCM_Video_PFrame_Canny1ch_Spconv",
         ],
     )
     p.add_argument(
@@ -479,6 +480,7 @@ def main():
     is_canny1ch = args.model_name in (
         "HPCM_Video_PFrame_Canny1ch",
         "HPCM_Video_PFrame_Canny1ch_ME",
+        "HPCM_Video_PFrame_Canny1ch_Spconv",
     )
     metric_line = (
         "Metrics: continuous Canny PSNR [0,1]"

@@ -268,3 +268,29 @@ python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
 python scripts/eval_sr_metrics.py \
   --out-dir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda5_x8 \
   --gt-dir /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512
+
+
+  cd /home/exx/Documents/Tianma/DCVC
+conda activate dcvc-rt
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+# 首次：准备全量 RealVSR（50 clips × 50 frames）并跑 6 个码率点
+PREPARE_DATA=1 RATE_NUM=6 bash scripts/run_realvsr_all_rates.sh
+# 已有数据，只跑 RD
+RATE_NUM=6 bash scripts/run_realvsr_all_rates.sh
+# 同时导出解码图（flat 命名 016_00000.png，可接 StableSR）
+EXPORT_IMAGES=1 RATE_NUM=6 bash scripts/run_realvsr_all_rates.sh
+# GOP 模式（仅首帧 I，其余 P 帧）
+INTRA_PERIOD=-1 RATE_NUM=4 bash scripts/run_realvsr_all_rates.sh
+
+EPOCHS=300 \
+PATCH_SIZE=256 \
+NUM_WORKERS=8 \
+SAVE_INTERVAL=100 \
+LAMBDA = 0.00005 \
+BATCH_SIZE = 32 \
+OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/spconv_lambda5_bs4 \
+CANNY_TRAIN=/data/Dataset/HPCM_canny_train \
+CANNY_TEST=/data/Dataset/DIV2K/DIV2K_valid_100_512_128/canny \
+INIT_CKPT=/path/to/previous/epoch_best.pth.tar \
+TRAIN_LOG=/data/Dataset/LIC-HPCM_outputs/my_exp/train.log \
+bash codec/scripts/hpcm/train_hpcm_canny_spconv.sh

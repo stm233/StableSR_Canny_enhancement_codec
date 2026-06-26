@@ -2,11 +2,34 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+
+
+def _collect_image_paths(data_dir: str | Path) -> list[str]:
+    """Flat folder first; if empty, recurse into video subdirs (e.g. RealVSR/canny/016/)."""
+    root = Path(data_dir)
+    if not root.is_dir():
+        return []
+
+    flat = sorted(
+        str(p)
+        for p in root.iterdir()
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+    )
+    if flat:
+        return flat
+
+    return sorted(
+        str(p)
+        for p in root.rglob("*")
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+    )
 
 
 class CannyLDataset(Dataset):
@@ -14,11 +37,9 @@ class CannyLDataset(Dataset):
 
     def __init__(self, data_path, transform=None):
         self.data_dir = data_path
-        self.dataset_list = sorted(
-            f for f in os.listdir(self.data_dir)
-            if os.path.isfile(os.path.join(self.data_dir, f))
-            and f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp"))
-        )
+        self.dataset_list = _collect_image_paths(data_path)
+        if len(self.dataset_list) == 0:
+            raise RuntimeError(f"No Canny images found under {data_path}")
         self.transform = transform
 
     def __len__(self):
@@ -31,7 +52,7 @@ class CannyLDataset(Dataset):
         return (t / 255.0).unsqueeze(0)
 
     def __getitem__(self, idx):
-        path = os.path.join(self.data_dir, self.dataset_list[idx])
+        path = self.dataset_list[idx]
         x = self._load_l01(path)
         if self.transform is not None:
             x = self.transform(x)

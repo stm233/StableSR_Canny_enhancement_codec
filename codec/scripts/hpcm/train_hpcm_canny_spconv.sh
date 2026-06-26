@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train HPCM_Canny1ch_ME: MinkowskiEngine conv in g_a/g_s/h_a/h_s (ablation).
+# Train HPCM_Canny1ch_Spconv: spconv sparse conv in g_a/g_s/h_a/h_s (ablation).
 source "$(dirname "$0")/env.sh"
 set -euo pipefail
 
@@ -14,12 +14,14 @@ CANNY_TRAIN="${CANNY_TRAIN:-/data/Dataset/RealVSR_GT_test_iframe_all/canny}"
 CANNY_TEST="${CANNY_TEST:-/data/Dataset/RealVSR_GT_test_iframe_all/canny}"
 INIT_CKPT="${INIT_CKPT:-}"
 
-OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/train_canny1ch_me_lambda${LAMBDA}}"
+OUT_ROOT="${OUT_ROOT:-/data/Dataset/LIC-HPCM_outputs/train_canny1ch_spconv_lambda${LAMBDA}}"
 SAVE_PATH="${OUT_ROOT}/checkpoints"
 LOG_DIR="${OUT_ROOT}/logs"
 TRAIN_LOG="${TRAIN_LOG:-${OUT_ROOT}/train.log}"
 
 mkdir -p "${SAVE_PATH}" "${LOG_DIR}"
+
+"${PYTHON}" -c "import spconv; print('spconv', spconv.__version__)"
 
 [[ -d "${CANNY_TRAIN}" ]] || { echo "Missing train canny dir: ${CANNY_TRAIN}"; exit 1; }
 [[ -d "${CANNY_TEST}" ]] || { echo "Missing test canny dir: ${CANNY_TEST}"; exit 1; }
@@ -30,16 +32,15 @@ if [[ -n "${INIT_CKPT}" ]]; then
   ckpt_args=(--checkpoint "${INIT_CKPT}")
 fi
 
-echo "Model:      HPCM_Canny1ch_ME"
+echo "Model:      HPCM_Canny1ch_Spconv"
 echo "Lambda:     ${LAMBDA}"
 echo "Train:      ${CANNY_TRAIN}"
-echo "Test:       ${CANNY_TEST}"
 echo "Save:       ${SAVE_PATH}"
 echo ""
 
 cd "${CODEC_ROOT}"
 "${PYTHON}" train.py \
-  --model_name HPCM_Canny1ch_ME \
+  --model_name HPCM_Canny1ch_Spconv \
   --train_dataset "${CANNY_TRAIN}" \
   --test_dataset "${CANNY_TEST}" \
   "${ckpt_args[@]}" \

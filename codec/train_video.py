@@ -308,6 +308,7 @@ def main(argv):
             "HPCM_Video_PFrame_DT1ch",
             "HPCM_Video_PFrame_Canny1ch",
             "HPCM_Video_PFrame_Canny1ch_ME",
+            "HPCM_Video_PFrame_Canny1ch_Spconv",
         ):
             if args.checkpoint:
                 print(f"Loading I-frame checkpoint (ref path only): {args.checkpoint}")
