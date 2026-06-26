@@ -2078,12 +2078,88 @@ class LatentDiffusionSRTextWT(DDPM):
         return [lq, gt]
 
     @torch.no_grad()
+    def _get_input_precomputed_lq_canny(
+        self, batch, return_first_stage_outputs=False, bs=None, val=False, text_cond=[''], resize_lq=True
+    ):
+        """Use pre-exported LQ (e.g. 64x64 codec LR) + Canny hint; skip RealESRGAN degradation."""
+        if not hasattr(self, 'usm_sharpener'):
+            usm_sharpener = USMSharp().cuda()
+        else:
+            usm_sharpener = self.usm_sharpener
+
+        im_gt = batch['gt'].cuda().to(memory_format=torch.contiguous_format).float()
+        im_lq = batch['lq'].cuda().to(memory_format=torch.contiguous_format).float()
+        if self.use_usm:
+            im_gt = usm_sharpener(im_gt)
+        im_gt = torch.clamp(im_gt, 0, 1.0)
+        im_lq = torch.clamp(im_lq, 0, 1.0)
+
+        self.gt = im_gt
+        self.lq = im_lq
+        if resize_lq:
+            self.lq = F.interpolate(
+                self.lq,
+                size=(self.gt.size(-2), self.gt.size(-1)),
+                mode='bicubic',
+            )
+
+        if not val and not self.random_size:
+            self._dequeue_and_enqueue()
+
+        self.lq = self.lq.contiguous() * 2.0 - 1.0
+        self.gt = self.gt.contiguous() * 2.0 - 1.0
+        if self.random_size:
+            self.lq, self.gt = self.randn_cropinput(self.lq, self.gt)
+        self.lq = torch.clamp(self.lq, -1.0, 1.0)
+
+        x = self.lq
+        y = self.gt
+        if bs is not None:
+            x = x[:bs]
+            y = y[:bs]
+        x = x.to(self.device)
+        y = y.to(self.device)
+
+        encoder_posterior = self.encode_first_stage(x)
+        z = self.get_first_stage_encoding(encoder_posterior).detach()
+        encoder_posterior_y = self.encode_first_stage(y)
+        z_gt = self.get_first_stage_encoding(encoder_posterior_y).detach()
+
+        while len(text_cond) < z.size(0):
+            text_cond.append(text_cond[-1])
+        if len(text_cond) > z.size(0):
+            text_cond = text_cond[: z.size(0)]
+
+        out = [z, text_cond, z_gt]
+        if getattr(self, 'use_hq_canny_cond', False) and getattr(self, 'canny_controlnet', None) is not None:
+            canny_hint = batch['canny'].cuda().float().clamp(0, 1.0)
+            if canny_hint.shape[-2:] != y.shape[-2:]:
+                canny_hint = F.interpolate(
+                    canny_hint, size=y.shape[-2:], mode='bicubic', align_corners=False
+                )
+            out.append(canny_hint)
+
+        if return_first_stage_outputs:
+            xrec = self.decode_first_stage(z_gt)
+            out.extend([x, self.gt, xrec])
+        return out
+
+    @torch.no_grad()
     def get_input(self, batch, k=None, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, val=False, text_cond=[''], return_gt=False, resize_lq=True):
 
         """Degradation pipeline, modified from Real-ESRGAN:
         https://github.com/xinntao/Real-ESRGAN
         """
+        if getattr(self.configs, 'use_precomputed_lq_canny', False):
+            return self._get_input_precomputed_lq_canny(
+                batch,
+                return_first_stage_outputs=return_first_stage_outputs,
+                bs=bs,
+                val=val,
+                text_cond=text_cond,
+                resize_lq=resize_lq,
+            )
 
         if not hasattr(self, 'jpeger'):
             jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts

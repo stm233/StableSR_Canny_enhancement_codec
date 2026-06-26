@@ -42,9 +42,9 @@ python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --vqgan-config configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml \
   --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
   --init-img /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_lr64/MSE/lambda_0.0018/images \
-  --canny-dir /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/canny/MSE/lambda_0.0035/images \
-  --gt-img /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512 \
-  --outdir /data/Dataset/StableSR-TestSets/codec/MSE_0.0035_x8 \
+  --canny-dir /data/Dataset/LIC-HPCM_outputs/RealVSR_gop_canny1ch_smoke/canny \
+  --gt-img /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512 \
+  --outdir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda11_x8 \
   --input_size 512 \
   --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
   --compute_metrics --save_canny_vis
@@ -237,3 +237,34 @@ bash codec/scripts/hpcm/test_hqvsr_iframe.sh \
   2>&1 | tee /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_canny1ch_m128/test.log
 
 SAVE_IMAGES=0 \
+
+cd /home/exx/Documents/Tianma/StableSR
+
+CUDA_VISIBLE_DEVICES=0 \
+PFRAME_CKPT=/home/exx/Documents/Tianma/StableSR/codec/checkpoints/P_frame/lambda_5_epoch_8.tar \
+DATA_ROOT=/data/Dataset/RealVSR_GT_test_iframe_all \
+NUM_P=7 \
+MAX_VIDEOS=0 \
+MAX_GOPS_PER_VIDEO=0 \
+SAVE_IMAGES=1 \
+OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/RealVSR_gop_canny1ch_full \
+bash codec/scripts/hpcm/infer_realvsr_gop_canny1ch.sh
+
+
+# test SR
+python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
+  --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
+  --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-25T17-11-14_stablesr_cn_canny_codec_x8/checkpoints/epoch=000006.ckpt \
+  --vqgan-config configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml \
+  --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
+  --init-img /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_lr64/MSE/lambda_0.0018/images \
+  --canny-dir /data/Dataset/LIC-HPCM_outputs/RealVSR_gop_canny1ch_full/canny/lambda5_P7 \
+  --gt-img /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512 \
+  --outdir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda5_x8_finetune \
+  --input_size 512 \
+  --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
+  --compute_metrics --save_canny_vis
+
+python scripts/eval_sr_metrics.py \
+  --out-dir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda5_x8 \
+  --gt-dir /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GOP video inference: I + N×P with HPCM_DT1ch / HPCM_Video_PFrame_DT1ch (bitstream path)."""
+"""GOP video inference: I + N×P bitstream (DT1ch or Canny1ch P-frame models)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from torchvision.transforms import ToTensor
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.utils.distance_transform import canny_to_dt_rgb  # noqa: E402
-from utils import compute_dt_canny_psnr  # noqa: E402
+from utils import compute_dt_canny_psnr, psnr_continuous  # noqa: E402
 from test import (  # noqa: E402
     AverageMeter,
     _save_results,
@@ -93,12 +93,22 @@ class GopResult:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GOP infer: I + N P-frames (DT1ch bitstream).")
+    p = argparse.ArgumentParser(description="GOP infer: I + N P-frames (bitstream).")
+    p.add_argument(
+        "--model-name",
+        type=str,
+        default="HPCM_Video_PFrame_Canny1ch",
+        choices=[
+            "HPCM_Video_PFrame_DT1ch",
+            "HPCM_Video_PFrame_Canny1ch",
+            "HPCM_Video_PFrame_Canny1ch_ME",
+        ],
+    )
     p.add_argument(
         "--pframe-checkpoint",
         type=str,
         required=True,
-        help="HPCM_Video_PFrame_DT1ch checkpoint (includes iframe_codec + codec)",
+        help="Full P-frame checkpoint (iframe_codec + codec + fusion)",
     )
     p.add_argument(
         "--iframe-checkpoint",
@@ -129,6 +139,12 @@ def parse_args():
     )
     p.add_argument("--results-dir", type=str, default="")
     p.add_argument("--outdir", type=str, default="", help="Save recon PNGs")
+    p.add_argument(
+        "--export-stablesr",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Canny1ch: save to outdir/canny/images/{video}_{frame}.png for StableSR --canny-dir",
+    )
     return p.parse_args()
 
 
@@ -224,6 +240,153 @@ def encode_decode_p(
     return x_hat, dec["ref_feats"], fr
 
 
+@torch.no_grad()
+def encode_decode_i_canny(
+    model,
+    canny_path: Path,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict, FrameResult, tuple[int, int]]:
+    gt = load_canny_1ch(canny_path).to(device)
+    h, w = gt.size(2), gt.size(3)
+    x_pad = pad(gt)
+
+    _sync(device)
+    t0 = time.time()
+    enc = model.compress_i(x_pad)
+    _sync(device)
+    enc_t = time.time() - t0
+
+    _sync(device)
+    t0 = time.time()
+    dec = model.decompress_i(enc["strings"], enc["shape"])
+    _sync(device)
+    dec_t = time.time() - t0
+
+    x_hat = crop(dec["x_hat"], (h, w))
+    psnr = psnr_continuous(x_hat, gt, peak=255.0).item()
+    bpp = bitstream_bpp(enc["strings"], h, w)
+    fr = FrameResult(
+        video="",
+        frame_idx=0,
+        frame_type="I",
+        psnr=psnr,
+        psnr_dt=psnr,
+        psnr_canny=psnr,
+        bpp=bpp,
+        y_bpp=len(enc["strings"][0]) * 8.0 / (h * w),
+        z_bpp=len(enc["strings"][1]) * 8.0 / (h * w),
+        enc_time=enc_t,
+        dec_time=dec_t,
+    )
+    return x_hat, dec["ref_feats"], fr, (h, w)
+
+
+@torch.no_grad()
+def encode_decode_p_canny(
+    model,
+    curr_canny_path: Path,
+    ref_feats: dict,
+    device: torch.device,
+    frame_idx: int,
+) -> tuple[torch.Tensor, dict, FrameResult]:
+    gt = load_canny_1ch(curr_canny_path).to(device)
+    h, w = gt.size(2), gt.size(3)
+    x_pad = pad(gt)
+
+    _sync(device)
+    t0 = time.time()
+    enc = model.compress_p(x_pad, ref_feats)
+    _sync(device)
+    enc_t = time.time() - t0
+
+    _sync(device)
+    t0 = time.time()
+    dec = model.decompress_p(enc["strings"], enc["shape"], ref_feats)
+    _sync(device)
+    dec_t = time.time() - t0
+
+    x_hat = crop(dec["x_hat"], (h, w))
+    psnr = psnr_continuous(x_hat, gt, peak=255.0).item()
+    bpp = bitstream_bpp(enc["strings"], h, w)
+    fr = FrameResult(
+        video="",
+        frame_idx=frame_idx,
+        frame_type="P",
+        psnr=psnr,
+        psnr_dt=psnr,
+        psnr_canny=psnr,
+        bpp=bpp,
+        y_bpp=len(enc["strings"][0]) * 8.0 / (h * w),
+        z_bpp=len(enc["strings"][1]) * 8.0 / (h * w),
+        enc_time=enc_t,
+        dec_time=dec_t,
+    )
+    return x_hat, dec["ref_feats"], fr
+
+
+def stablesr_frame_name(video: str, frame_path: Path) -> str:
+    """Match prepare_realvsr_lr64_flat / HPCM_Base lr64 naming: 016_00000.png."""
+    return f"{video}_{frame_path.stem}.png"
+
+
+def save_stablesr_canny(out_root: Path, video: str, frame_path: Path, x_hat: torch.Tensor) -> Path:
+    """Save decoded canny for sr_val_ddpm_text_T_vqganfin_hqCanny --canny-dir."""
+    from test_video_iframe import tensor_to_image
+
+    canny_dir = out_root / "canny" / "images"
+    canny_dir.mkdir(parents=True, exist_ok=True)
+    out_path = canny_dir / stablesr_frame_name(video, frame_path)
+    tensor_to_image(x_hat).save(out_path)
+    return out_path
+
+
+def run_gop_canny(
+    model,
+    video: str,
+    frames: list[Path],
+    gop_idx: int,
+    num_p: int,
+    device: torch.device,
+    outdir: Path | None,
+    export_stablesr: bool = True,
+) -> GopResult | None:
+    gop_len = 1 + num_p
+    start = gop_idx * gop_len
+    if start >= len(frames):
+        return None
+    chunk = frames[start : start + gop_len]
+    if not chunk:
+        return None
+
+    gop = GopResult(video=video, gop_idx=gop_idx, num_p=num_p)
+    from test_video_iframe import tensor_to_image
+
+    x_hat_i, ref_feats, fr_i, _ = encode_decode_i_canny(model, chunk[0], device)
+    fr_i.video = video
+    fr_i.frame_idx = start
+    gop.frames.append(fr_i)
+
+    if outdir is not None:
+        if export_stablesr:
+            save_stablesr_canny(outdir, video, chunk[0], x_hat_i)
+        else:
+            tensor_to_image(x_hat_i).save(outdir / f"{video}_f{start:06d}_I.png")
+
+    for pi, p_path in enumerate(chunk[1:], start=1):
+        x_hat, ref_feats, fr_p = encode_decode_p_canny(
+            model, p_path, ref_feats, device, start + pi
+        )
+        fr_p.video = video
+        gop.frames.append(fr_p)
+        if outdir is not None:
+            if export_stablesr:
+                save_stablesr_canny(outdir, video, p_path, x_hat)
+            else:
+                tensor_to_image(x_hat).save(outdir / f"{video}_f{start + pi:06d}_P.png")
+
+    return gop
+
+
 def run_gop(
     model,
     video: str,
@@ -299,7 +462,7 @@ def main():
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)
 
-    net = importlib.import_module(".HPCM_Video_PFrame_DT1ch", "src.models").HPCM
+    net = importlib.import_module(f".{args.model_name}", "src.models").HPCM
     model = net(use_lossy_ref=True).eval()
     ckpt = torch.load(args.pframe_checkpoint, map_location="cpu")
     model.load_state_dict(ckpt, strict=True)
@@ -313,11 +476,21 @@ def main():
     model.iframe_codec.eval()
     model = model.to(device)
 
+    is_canny1ch = args.model_name in (
+        "HPCM_Video_PFrame_Canny1ch",
+        "HPCM_Video_PFrame_Canny1ch_ME",
+    )
+    metric_line = (
+        "Metrics: continuous Canny PSNR [0,1]"
+        if is_canny1ch
+        else f"Metrics: inverted R PSNR + binarized edge PSNR (R_hat>={args.edge_threshold})"
+    )
     print(
+        f"Model: {args.model_name}\n"
         f"GOP pattern: I + {args.num_p}P  (GOP size = {1 + args.num_p})\n"
         f"Videos: {len(video_names)}  device: {device}\n"
         f"P-frame ckpt: {args.pframe_checkpoint}\n"
-        f"Metrics: inverted R PSNR + binarized edge PSNR (R_hat>={args.edge_threshold})"
+        f"{metric_line}"
     )
 
     all_frames: list[FrameResult] = []
@@ -339,9 +512,14 @@ def main():
             max_gops = min(max_gops, args.max_gops_per_video)
 
         for gi in range(max_gops):
-            gop = run_gop(
-                model, vname, frames, gi, args.num_p, device, outdir, args.edge_threshold
-            )
+            if is_canny1ch:
+                gop = run_gop_canny(
+                    model, vname, frames, gi, args.num_p, device, outdir, args.export_stablesr
+                )
+            else:
+                gop = run_gop(
+                    model, vname, frames, gi, args.num_p, device, outdir, args.edge_threshold
+                )
             if gop is None or not gop.frames:
                 continue
             all_gops.append(gop)

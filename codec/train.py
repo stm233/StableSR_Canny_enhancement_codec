@@ -41,7 +41,7 @@ class Dataset(torch.utils.data.Dataset):
 def build_datasets(args):
     """HPCM_Canny1ch: 1ch L-mode Canny; HPCM_DT1ch: 3ch DT; legacy RGB for other models."""
     model = getattr(args, "model_name", "")
-    if model == "HPCM_Canny1ch":
+    if model in ("HPCM_Canny1ch", "HPCM_Canny1ch_ME"):
         train_tf = transforms.Compose([
             transforms.RandomCrop(args.patch_size),
             transforms.RandomHorizontalFlip(),

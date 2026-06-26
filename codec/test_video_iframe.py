@@ -91,7 +91,7 @@ def prepare_codec_input(
     edge = load_canny_tensor(canny_path)
     if model_name == "HPCM_DT1ch":
         x = canny_to_dt_rgb(edge.squeeze(0)).unsqueeze(0)
-    elif model_name == "HPCM_Canny1ch":
+    elif model_name in ("HPCM_Canny1ch", "HPCM_Canny1ch_ME"):
         x = edge
     else:
         x = load_canny_rgb_tensor(canny_path)
@@ -102,7 +102,7 @@ def metric_target(model_name: str, x: torch.Tensor, gt_canny: torch.Tensor) -> t
     """Target for PSNR — same convention as training."""
     if model_name == "HPCM_DT1ch":
         return x[:, :1]
-    if model_name in ("HPCM_Canny1ch", "HPCM_Base_Lite"):
+    if model_name in ("HPCM_Canny1ch", "HPCM_Canny1ch_ME"):
         return gt_canny
     return x
 
