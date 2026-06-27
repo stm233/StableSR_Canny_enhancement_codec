@@ -20,7 +20,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
-from src.datasets import IFrameDataset, PFrameDataset, PFrameDTDataset, PFrameDTCachedDataset
+from src.datasets import (
+    IFrameDataset,
+    PFrameDataset,
+    PFrameDTDataset,
+    PFrameDTCachedDataset,
+    build_hqvsr_cond_splits,
+)
 from utils import psnr_continuous
 
 
@@ -81,11 +87,23 @@ class CustomDataParallel(nn.DataParallel):
             return getattr(self.module, key)
 
 
+def _is_cond_model(model_name: str) -> bool:
+    return model_name.endswith("_Cond")
+
+
 def _unpack_batch(batch, stage: str, device: torch.device):
     if stage == "iframe":
+        if isinstance(batch, dict):
+            model_batch = {
+                "input": batch["input"].to(device),
+                "cond": batch["cond"].to(device),
+            }
+            return model_batch, batch["target"].to(device)
         x = batch.to(device)
         return x, x
     model_batch = {"input": batch["input"].to(device)}
+    if "cond" in batch:
+        model_batch["cond"] = batch["cond"].to(device)
     if "ref_feats" in batch:
         model_batch["ref_feats"] = {
             k: v.to(device) for k, v in batch["ref_feats"].items()
@@ -172,6 +190,15 @@ def test_epoch(epoch, test_dataloader, model, criterion, writer, stage):
 
 def build_datasets(args):
     patch = tuple(args.patch_size)
+    if getattr(args, "hqvsr_codec", False):
+        return build_hqvsr_cond_splits(
+            args.dataset_root,
+            val_samples=args.val_samples,
+            val_seed=args.seed or 42,
+            patch_size=patch,
+            stage=args.stage,
+        )
+
     if args.stage == "iframe":
         cls = IFrameDataset
         cls_kwargs = {}
@@ -211,6 +238,12 @@ def parse_args(argv):
         default="/data/Dataset/HQ-VSR_processed",
     )
     parser.add_argument("--val-ratio", type=float, default=0.01)
+    parser.add_argument(
+        "--hqvsr-codec",
+        action="store_true",
+        help="Use HQ-VSR_SR_codec: train canny256, val 500 random canny128, cond=canny64_lossy",
+    )
+    parser.add_argument("--val-samples", type=int, default=500)
     parser.add_argument("--epochs", type=int, default=3001)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--lambda", dest="lmbda", type=float, default=0.00105)
@@ -249,9 +282,15 @@ def main(argv):
     args = parse_args(argv)
     if args.model_name is None:
         if args.stage == "pframe":
-            args.model_name = "HPCM_Video_PFrame_Canny1ch"
+            args.model_name = (
+                "HPCM_Video_PFrame_Canny1ch_Spconv_Cond"
+                if args.hqvsr_codec
+                else "HPCM_Video_PFrame_Canny1ch"
+            )
         else:
-            args.model_name = "HPCM_Canny1ch"
+            args.model_name = (
+                "HPCM_Canny1ch_Spconv_Cond" if args.hqvsr_codec else "HPCM_Canny1ch"
+            )
     print(args)
 
     tag = f"{args.model_name}_{args.stage}_lmbda{args.lmbda}"
@@ -309,6 +348,7 @@ def main(argv):
             "HPCM_Video_PFrame_Canny1ch",
             "HPCM_Video_PFrame_Canny1ch_ME",
             "HPCM_Video_PFrame_Canny1ch_Spconv",
+            "HPCM_Video_PFrame_Canny1ch_Spconv_Cond",
         ):
             if args.checkpoint:
                 print(f"Loading I-frame checkpoint (ref path only): {args.checkpoint}")

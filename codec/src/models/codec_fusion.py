@@ -16,23 +16,43 @@ def _fuse(x: torch.Tensor, ref: torch.Tensor, proj: nn.Module) -> torch.Tensor:
     return x + proj(ref)
 
 
+def extract_ga_encoder_cond_feats(g_a: nn.Module, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Partial g_a forward: features at H/2 (32ch) and H/4 (64ch)."""
+    b = g_a.branch
+    x = b[0](x)
+    x = b[1](x)
+    x = b[2](x)
+    cond_h2 = x
+    x = b[3](x)
+    x = b[4](x)
+    x = b[5](x)
+    cond_h4 = x
+    return {"cond_h2": cond_h2, "cond_h4": cond_h4}
+
+
 def g_a_forward(
     g_a: nn.Module,
     x: torch.Tensor,
     ref: dict[str, torch.Tensor] | None,
     fuse: nn.ModuleDict | None,
+    cond_feats: dict[str, torch.Tensor] | None = None,
+    cond_fuse: nn.ModuleDict | None = None,
 ) -> torch.Tensor:
-    """g_a with optional decoder ref features f1@H/4, f2@H/8, f3@H/16."""
+    """g_a with optional decoder ref features f1@H/4, f2@H/8, f3@H/16 and cond @ H/2,H/4."""
     b = g_a.branch
     x = b[0](x)
     x = b[1](x)
     x = b[2](x)
+    if cond_feats is not None and cond_fuse is not None and "cond_h2" in cond_feats:
+        x = _fuse(x, cond_feats["cond_h2"], cond_fuse["enc_cond_h2"])
     if ref is not None and fuse is not None and "f1" in ref:
         x = _fuse(x, ref["f1"], fuse["enc_f1"])
 
     x = b[3](x)
     x = b[4](x)
     x = b[5](x)
+    if cond_feats is not None and cond_fuse is not None and "cond_h4" in cond_feats:
+        x = _fuse(x, cond_feats["cond_h4"], cond_fuse["enc_cond_h4"])
     if ref is not None and fuse is not None and "f2" in ref:
         x = _fuse(x, ref["f2"], fuse["enc_f2"])
 
@@ -52,6 +72,8 @@ def g_s_decode_multiscale(
     y: torch.Tensor,
     ref: dict[str, torch.Tensor] | None = None,
     fuse: nn.ModuleDict | None = None,
+    cond_feats: dict[str, torch.Tensor] | None = None,
+    cond_fuse: nn.ModuleDict | None = None,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     """
     Decode latent y -> x_hat; return decoder features for next frame.
@@ -71,6 +93,8 @@ def g_s_decode_multiscale(
     feats["f2"] = x
     if ref is not None and fuse is not None and "f2" in ref:
         x = _fuse(x, ref["f2"], fuse["dec_f2"])
+    if cond_feats is not None and cond_fuse is not None and "cond_h4" in cond_feats:
+        x = _fuse(x, cond_feats["cond_h4"], cond_fuse["dec_cond_h4_f2"])
 
     x = b[5](x)
     x = b[6](x)
@@ -78,10 +102,14 @@ def g_s_decode_multiscale(
     feats["f1"] = x
     if ref is not None and fuse is not None and "f1" in ref:
         x = _fuse(x, ref["f1"], fuse["dec_f1"])
+    if cond_feats is not None and cond_fuse is not None and "cond_h4" in cond_feats:
+        x = _fuse(x, cond_feats["cond_h4"], cond_fuse["dec_cond_h4_f1"])
 
     x = b[8](x)
     x = b[9](x)
     x = b[10](x)
+    if cond_feats is not None and cond_fuse is not None and "cond_h2" in cond_feats:
+        x = _fuse(x, cond_feats["cond_h2"], cond_fuse["dec_cond_h2"])
     x = b[11](x)
     return feats, x
 

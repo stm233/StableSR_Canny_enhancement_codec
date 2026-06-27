@@ -1,0 +1,181 @@
+# StableSR + ControlNet Canny on HQ-VSR_SR_codec (DCVC lossy LQ64 + lossless Canny256 -> HQ512).
+#
+# Resolution handling (built into LatentDiffusionSRTextWT._get_input_precomputed_lq_canny):
+#   LQ 64x64  -> bicubic upscale to 512 for struct_cond VAE encode
+#   Canny 256 -> bicubic upscale to 512 for ControlNet hint
+#   GT 512    -> target
+#
+# Prepare manifest (once):
+#   python scripts/prepare_hqvsr_stablesr_cn_manifest.py
+#
+# Train:
+#   bash scripts/train_hqvsr_codec_x8_controlnet_canny.sh
+
+sf: 8
+use_precomputed_lq_canny: true
+
+model:
+  base_learning_rate: 1.0e-05
+  target: ldm.models.diffusion.ddpm.LatentDiffusionSRTextWT
+  params:
+    linear_start: 0.00085
+    linear_end: 0.0120
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: image
+    cond_stage_key: caption
+    image_size: 512
+    channels: 4
+    cond_stage_trainable: False
+    conditioning_key: crossattn
+    monitor: val/loss_simple_ema
+    scale_factor: 0.18215
+    use_ema: False
+
+    ckpt_path: /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000012.ckpt
+    unfrozen_diff: False
+    random_size: False
+    time_replace: 1000
+    use_usm: True
+
+    use_hq_canny_cond: true
+    canny_cond_weight: 1.0
+    hq_canny_train_lq_structcond: false
+    only_mid_canny_control: false
+
+    controlnet_ckpt_path: null
+    controlnet_init_from_unet: false
+    controlnet_train_mode: full
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModelDualcondV2
+      params:
+        image_size: 32
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_head_channels: 64
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        use_checkpoint: False
+        legacy: False
+        semb_channels: 256
+
+    first_stage_config:
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 512
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult: [ 1, 2, 4, 4 ]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    cond_stage_config:
+      target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+      params:
+        freeze: True
+        layer: "penultimate"
+
+    structcond_stage_config:
+      target: ldm.modules.diffusionmodules.openaimodel.EncoderUNetModelWT
+      params:
+        image_size: 96
+        in_channels: 4
+        model_channels: 256
+        out_channels: 256
+        num_res_blocks: 2
+        attention_resolutions: [ 4, 2, 1 ]
+        dropout: 0
+        channel_mult: [ 1, 1, 2, 2 ]
+        conv_resample: True
+        dims: 2
+        use_checkpoint: False
+        use_fp16: False
+        num_heads: 4
+        num_head_channels: -1
+        num_heads_upsample: -1
+        use_scale_shift_norm: False
+        resblock_updown: False
+        use_new_attention_order: False
+
+    canny_controlnet_stage_config:
+      target: ldm.modules.controlnet_cldm.ControlNet
+      params:
+        image_size: 32
+        in_channels: 4
+        hint_channels: 3
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_head_channels: 64
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        use_checkpoint: True
+        legacy: False
+
+degradation:
+  gt_size: 512
+  no_degradation_prob: 1.0
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 4
+    num_workers: 8
+    wrap: false
+    train:
+      target: basicsr.data.hqvsr_paired_lq_canny_dataset.HQVSRClipPairedLQCannyDataset
+      params:
+        codec_root: "/data/Dataset/HQ-VSR_SR_codec"
+        manifest: "manifest_stablesr_cn_train.jsonl"
+        io_backend:
+          type: disk
+        use_hflip: true
+        use_rot: false
+
+    validation:
+      target: basicsr.data.hqvsr_paired_lq_canny_dataset.HQVSRClipPairedLQCannyDataset
+      params:
+        codec_root: "/data/Dataset/HQ-VSR_SR_codec"
+        manifest: "manifest_stablesr_cn_val.jsonl"
+        io_backend:
+          type: disk
+        use_hflip: false
+        use_rot: false
+
+lightning:
+  modelcheckpoint:
+    params:
+      every_n_train_steps: 500
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        batch_frequency: 500
+        max_images: 4
+        increase_log_steps: False
+
+  trainer:
+    benchmark: True
+    max_steps: 10000
+    accumulate_grad_batches: 4
+    val_check_interval: 500

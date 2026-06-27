@@ -1,15 +1,19 @@
 tmux attach -t stablesr
+cd /home/exx/Documents/Tianma/StableSR
 
-
-# ========== Stage 1: ControlNet Canny diffusion SR ==========
+# ========== Training: ControlNet Canny diffusion SR ==========
 python main.py --train \
   --base configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
   --gpus 0, \
   --name stablesr_cn_canny \
   --scale_lr False \
-  2>&1 | tee logs/train.log
+  2>&1 | tee logs/train.log、
 
-# Stage 1 inference (DIV2K Val 100) # test for 4x SR controlnet canny
+# 开始训练 for HQ-VSR_SR_codec
+bash scripts/train_hqvsr_codec_x8_controlnet_canny.sh
+
+# ========== test for SR controlnet canny ====================
+# change the input image for different SR scale
 python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
   --ckpt logs/2026-06-02T01-01-09_stablesr_cn_canny/checkpoints/epoch=000020.ckpt \
@@ -22,34 +26,13 @@ python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
   --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
   --compute_metrics --save_canny_vis
 
-# Stage 1 inference (DIV2K Val 100) # test for 8x SR controlnet canny
-  python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
-  --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
-  --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000003.ckpt \
-  --vqgan-config configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml \
-  --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
-  --init-img /data/Dataset/DIV2K/DIV2K_valid_100_512_64/LR_64 \
-  --gt-img /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512 \
-  --outdir /data/Dataset/StableSR-TestSets/outputs_DIV2K_Val100_controlnet_canny_new_3_x8 \
-  --input_size 512 \
-  --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
-  --compute_metrics --save_canny_vis
+# evaluate metrics
+python scripts/eval_sr_metrics.py \
+  --out-dir /data/Dataset/StableSR-TestSets/codec/MSE_0.0018_x8_controlnet_canny_new_3 \
+  --gt-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512
 
-# Stage 1 inference (DIV2K Val 100) decompressed Images ( 8x SR controlnet canny)
-python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
-  --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
-  --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-06T00-08-37_stablesr_cn_canny/checkpoints/epoch=000012.ckpt \
-  --vqgan-config configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml \
-  --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
-  --init-img /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_lr64/MSE/lambda_0.0018/images \
-  --canny-dir /data/Dataset/LIC-HPCM_outputs/RealVSR_gop_canny1ch_smoke/canny \
-  --gt-img /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512 \
-  --outdir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda11_x8 \
-  --input_size 512 \
-  --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
-  --compute_metrics --save_canny_vis
 
-# Visual compare: LQ | GT | Canny | Baseline | Your SR + 2 crop zooms + PSNR/SSIM(Y)/LPIPS
+# ========== Visual compare: LQ | GT | Canny | Baseline | Your SR + 2 crop zooms + PSNR/SSIM(Y)/LPIPS
 python scripts/visualize_sr_compare.py \
   --lq-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_128/LR_128 \
   --gt-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512 \
@@ -75,148 +58,16 @@ python scripts/visualize_sr_compare_auto.py \
   --top-images 25 \
   --device cpu
 
-# evaluate metrics
-python scripts/eval_sr_metrics.py \
-  --out-dir /data/Dataset/StableSR-TestSets/codec/MSE_0.0018_x8_controlnet_canny_new_3 \
-  --gt-dir /data/Dataset/DIV2K/DIV2K_valid_100_512_128/HR_512
+python DCVC/scripts/hqvsr/visualize_sr_codec_compare.py \
+  --clip '__jqamhpbE4_11_16to287' \
+  --out /data/Dataset/HQ-VSR_SR_codec/visualizations/compare_1.png
 
-
-
-
-
-# ========== HPCM canny codec train（codec 在 StableSR/codec/）==========
-cd /home/exx/Documents/Tianma/StableSR
-# LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_canny.sh
-
-# ========== HPCM direct 512x512 compression baseline ==========
-cd /home/exx/Documents/Tianma/StableSR
-bash codec/scripts/hpcm/run_hpcm_hr512_mse_rd.sh
-# DEVICE=cpu bash scripts/run_hpcm_hr512_mse_rd.sh
-# RUN_COMPRESS=0 bash scripts/run_hpcm_hr512_mse_rd.sh   # eval + plot only
-
-# ========== HPCM codec-LQ -> SR x8 R-D (6 MSE lambdas × baseline + ControlNet) ==========
-cd /home/exx/Documents/Tianma/StableSR
-bash scripts/run_hpcm_lq_sr_x8_rd.sh
-# RUN_INFER=0 bash scripts/run_hpcm_lq_sr_x8_rd.sh   # eval + plot only
-# SKIP_EXISTING=0 bash scripts/run_hpcm_lq_sr_x8_rd.sh
-
-# ========== SR x8: hq LQ (MSE 0.0483) + canny MS-SSIM 6 pts (1 baseline + 6 CN = 7 runs) ==========
-# BPP: baseline = LQ_bpp/64; controlnet = LQ_bpp/64 + canny_bpp
-cd /home/exx/Documents/Tianma/StableSR
-bash scripts/run_hq_lq_canny_msssim_combined_rd.sh
-# RUN_INFER=0 bash scripts/run_hq_lq_canny_msssim_combined_rd.sh   # eval + plot only
-
-# ========== SR x8: raw LR_64 + HPCM-compressed canny MSE (6 rates × 2 SR = 12 runs) ==========
-# bash scripts/run_canny_codec_sr_x8_rd.sh
-# METRIC=msssim bash scripts/run_canny_codec_sr_x8_rd.sh   # MS-SSIM only, 6 points
-# METRIC=both bash scripts/run_canny_codec_sr_x8_rd.sh     # MSE + MS-SSIM, 12 points
-
-# Plot only MS-SSIM (6 points):
-# python scripts/plot_canny_codec_sr_rd_curves.py \
-#   --metrics-dir /data/Dataset/StableSR-TestSets/codec_rd/canny_codec_x8/metrics \
-#   --canny-hpcm-root /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/canny \
-#   --out-dir /data/Dataset/StableSR-TestSets/codec_rd/canny_codec_x8/rd_curves \
-#   --metric msssim
-
-# HPCM_Base: DIV2K Valid 100
-cd /home/exx/Documents/Tianma/StableSR
-bash codec/scripts/hpcm/run_div2k_valid100_all.sh
-
-python codec/test.py --model_name HPCM_Base \
-  --dataset /data/Dataset/DIV2K/DIV2K_valid_100_512_64/LR_64 \
-  --checkpoint checkpoints/HPCM_Base/MSE/0.025.pth.tar \
-  --outdir /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100_lr64_lambda0.025/images \
-  --results_dir /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100_lr64_lambda0.025 \
-  --device cpu
-
-cd /home/exx/Documents/Tianma/StableSR
-python scripts/plot_hpcm_lq_sr_rd_curves.py \
-  --metrics-dir /data/Dataset/StableSR-TestSets/codec_rd/x8/metrics \
-  --hpcm-root /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/lr64/MSE \
-  --hpcm-hr512-root /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/hr512/MSE \
-  --hpcm-hr512-metrics-dir /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/hr512/rd_metrics \
-  --out-dir /data/Dataset/StableSR-TestSets/codec_rd/x8/rd_curves
-
-python scripts/plot_canny_codec_sr_rd_curves.py \
-  --metrics-dir /data/Dataset/StableSR-TestSets/codec_rd/canny_codec_x8/metrics \
-  --canny-hpcm-root /data/Dataset/LIC-HPCM_outputs/DIV2K_valid100/canny \
-  --out-dir /data/Dataset/StableSR-TestSets/codec_rd/canny_codec_x8/rd_curves \
-  --metric msssim
-  
-bash scripts/train_hpcm_canny.sh
-
-cd /home/exx/Documents/Tianma/StableSR
-
-
-CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny_lambda0.00105/checkpoints/HPCM_Base_lmbda0.00105/epoch_best.pth.tar \
-  bash codec/scripts/hpcm/test_hqvsr_iframe.sh
-
-LAMBDA=0.00105 \
-bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
-
-# ========== Codec 自包含在 StableSR/codec/ ==========
-python codec/scripts/hpcm/create_hqvsr_test500.py \
-  --videos "video1,video2,video3,video4,video5"
-
-# 训练 Canny1ch（stdout -> train.log，指标 -> TensorBoard）
-# 前台：
-CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/00105_epoch_250.tar \
-LAMBDA=0.000005 bash codec/scripts/hpcm/train_hpcm_canny.sh
-
-# I-frame 训练
-BATCH_SIZE=64 LAMBDA=0.00155 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
-
-
-# 测试（可视化直接是 Canny，无需 DIST_TOL）
-MODEL_NAME=HPCM_DT1ch CHECKPOINT=.../epoch_best.pth.tar \
-  SAVE_IMAGES=1 bash codec/scripts/hpcm/test_hqvsr_iframe.sh
-
-# 测试 Canny1ch（R=G=B 进，1ch 出，recon/ 二值 Canny）
-CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints/HPCM_Canny1ch_lmbda0.00105/00105_epoch_250.tar \
-MODEL_NAME=HPCM_DT1ch \
-LAMBDA=0.00105 \
-  bash codec/scripts/hpcm/test_hqvsr_iframe.sh
-
-cd /home/exx/Documents/Tianma/StableSR
-
-CHECKPOINT=/home/exx/Documents/Tianma/StableSR/codec/checkpoints/our55_epoch_8.tar \
-MODEL_NAME=HPCM_DT1ch \
-DATA_ROOT=/data/Dataset/MVSR4x_GT_iframe_all \
-OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/MVSR4x_GT_iframe_all \
-SAVE_IMAGES=0 \
-bash codec/scripts/hpcm/test_hqvsr_iframe.sh
-
-
-# 或手动：
-# cd codec && python train.py \
-#   --model_name HPCM_Canny1ch \
-#   --train_dataset /data/Dataset/HPCM_canny_train \
-#   --test_dataset /data/Dataset/DIV2K/DIV2K_valid_100_512_128/canny \
-#   --lambda 0.00105 \
-#   --batch-size 32 \
-#   --patch-size 256 256 \
-#   --save_path /data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/checkpoints \
-#   --log_dir /data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00105/logs
-
-# 对比 GFLOPs
+# ========== 对比 GFLOPs
 python codec/scripts/hpcm/profile_hpcm_iframe_flops.py --model HPCM_Base_Lite
 python codec/scripts/hpcm/profile_hpcm_iframe_flops.py --model HPCM_Canny1ch
 python codec/scripts/hpcm/profile_hpcm_iframe_flops.py --model HPCM_DT1ch
 
-# DT codec: R=L1 dist, G=loc_x, B=loc_y; decode distance -> edge (0=white/255, else black)
-# LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
-# 可选预计算 DT 缓存: PREPARE_DT=1 LAMBDA=0.00105 bash codec/scripts/hpcm/train_hpcm_dt_canny.sh
-# 测试: cd codec && python test_dt_canny.py --checkpoint ... --dataset /path/to/canny
 
-cd /home/exx/Documents/Tianma/StableSR
-
-CUDA_VISIBLE_DEVICES=0 \
-LAMBDA=0.00055 \
-BATCH_SIZE=96 \
-PATCH_SIZE=256 \
-NUM_WORKERS=12 \
-OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00055 \
-bash codec/scripts/hpcm/train_hpcm_canny.sh
 
 CUDA_VISIBLE_DEVICES=0 \
 INIT_CKPT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011/checkpoints/HPCM_Canny1ch_lmbda0.00011/epoch_best.pth.tar \
@@ -228,59 +79,15 @@ OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011 \
 bash codec/scripts/hpcm/train_hpcm_canny.sh
 
 
-CUDA_VISIBLE_DEVICES=0 \
-MODEL_NAME=HPCM_Canny1ch \
-CHECKPOINT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_lambda0.00011/checkpoints/HPCM_Canny1ch_lmbda0.00011/epoch_best.pth.tar \
-DATA_ROOT=/data/Dataset/RealVSR_GT_test_iframe_all \
-OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_canny1ch_11 \
-bash codec/scripts/hpcm/test_hqvsr_iframe.sh \
-  2>&1 | tee /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_canny1ch_m128/test.log
-
-SAVE_IMAGES=0 \
-
-cd /home/exx/Documents/Tianma/StableSR
-
-CUDA_VISIBLE_DEVICES=0 \
-PFRAME_CKPT=/home/exx/Documents/Tianma/StableSR/codec/checkpoints/P_frame/lambda_5_epoch_8.tar \
-DATA_ROOT=/data/Dataset/RealVSR_GT_test_iframe_all \
-NUM_P=7 \
-MAX_VIDEOS=0 \
-MAX_GOPS_PER_VIDEO=0 \
-SAVE_IMAGES=1 \
-OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/RealVSR_gop_canny1ch_full \
-bash codec/scripts/hpcm/infer_realvsr_gop_canny1ch.sh
-
-
-# test SR
-python scripts/sr_val_ddpm_text_T_vqganfin_hqCanny.py \
-  --config configs/stableSRNew/v2-finetune_text_T_512_controlnet_canny.yaml \
-  --ckpt /home/exx/Documents/Tianma/StableSR/logs/2026-06-25T17-11-14_stablesr_cn_canny_codec_x8/checkpoints/epoch=000006.ckpt \
-  --vqgan-config configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml \
-  --vqgan_ckpt checkpoints/vqgan_cfw_00011.ckpt \
-  --init-img /data/Dataset/LIC-HPCM_outputs/RealVSR_GT_test_lr64/MSE/lambda_0.0018/images \
-  --canny-dir /data/Dataset/LIC-HPCM_outputs/RealVSR_gop_canny1ch_full/canny/lambda5_P7 \
-  --gt-img /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512 \
-  --outdir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda5_x8_finetune \
-  --input_size 512 \
-  --ddpm_steps 100 --dec_w 0.5 --colorfix_type adain --n_samples 1 \
-  --compute_metrics --save_canny_vis
-
-python scripts/eval_sr_metrics.py \
-  --out-dir /data/Dataset/StableSR-TestSets/codec/Pframe_lambda5_x8 \
-  --gt-dir /data/Dataset/RealVSR_GT_test_iframe_all_flat/gt512
-
-
-  cd /home/exx/Documents/Tianma/DCVC
+# ========== test for DCVC RT
+cd /home/exx/Documents/Tianma/DCVC
 conda activate dcvc-rt
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 # 首次：准备全量 RealVSR（50 clips × 50 frames）并跑 6 个码率点
 PREPARE_DATA=1 RATE_NUM=6 bash scripts/run_realvsr_all_rates.sh
 # 已有数据，只跑 RD
 RATE_NUM=6 bash scripts/run_realvsr_all_rates.sh
-# 同时导出解码图（flat 命名 016_00000.png，可接 StableSR）
-EXPORT_IMAGES=1 RATE_NUM=6 bash scripts/run_realvsr_all_rates.sh
-# GOP 模式（仅首帧 I，其余 P 帧）
-INTRA_PERIOD=-1 RATE_NUM=4 bash scripts/run_realvsr_all_rates.sh
+
 
 EPOCHS=300 \
 PATCH_SIZE=256 \
@@ -291,6 +98,10 @@ BATCH_SIZE = 32 \
 OUT_ROOT=/data/Dataset/LIC-HPCM_outputs/spconv_lambda5_bs4 \
 CANNY_TRAIN=/data/Dataset/HPCM_canny_train \
 CANNY_TEST=/data/Dataset/DIV2K/DIV2K_valid_100_512_128/canny \
-INIT_CKPT=/path/to/previous/epoch_best.pth.tar \
+INIT_CKPT=/data/Dataset/LIC-HPCM_outputs/train_canny1ch_spconv_lambda0.00011/checkpoints/HPCM_Canny1ch_Spconv_lmbda0.00011/epoch_best.pth.tar \
 TRAIN_LOG=/data/Dataset/LIC-HPCM_outputs/my_exp/train.log \
 bash codec/scripts/hpcm/train_hpcm_canny_spconv.sh
+
+
+
+bash /codec/scripts/hpcm/train_hqvsr_sr_codec_iframe.sh
