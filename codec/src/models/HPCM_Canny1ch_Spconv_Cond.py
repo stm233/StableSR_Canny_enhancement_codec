@@ -1,4 +1,8 @@
-"""I-frame Canny1ch spconv codec with canny64_lossy conditional encoder (H/2 + H/4 fusion)."""
+"""I-frame Canny1ch codec with canny64_lossy conditional encoder (H/2 + H/4 fusion).
+
+g_a / g_s: partial spconv (encoder first two stages, decoder last two stages).
+h_a / h_s / cond_g_a: dense conv on hyper path; cond_g_a shares g_a partial-spconv stem.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +13,10 @@ from src.layers import conv1x1
 
 from .base import BB as basemodel
 from .HPCM_Base import CrossAttentionCell, y_spatial_prior_s1_s2
-from .HPCM_Canny1ch import LATENT_M, LATENT_N
+from .HPCM_Canny1ch import LATENT_M, LATENT_N, h_a_128, h_s_128
 from .HPCM_Canny1ch_Spconv import (
-    g_a_1ch_spconv,
-    g_s_1ch_spconv,
-    h_a_128_spconv,
-    h_s_128_spconv,
+    g_a_1ch_partial_spconv,
+    g_s_1ch_partial_spconv,
 )
 from .codec_fusion import (
     extract_ga_encoder_cond_feats,
@@ -35,11 +37,11 @@ class HPCM(basemodel):
         self.M = m
         self.N = n
 
-        self.g_a = g_a_1ch_spconv(m)
-        self.g_s = g_s_1ch_spconv(m)
-        self.h_a = h_a_128_spconv(m, n)
-        self.h_s = h_s_128_spconv(m, n)
-        self.cond_g_a = g_a_1ch_spconv(m)
+        self.g_a = g_a_1ch_partial_spconv(m)
+        self.g_s = g_s_1ch_partial_spconv(m)
+        self.h_a = h_a_128(m, n)
+        self.h_s = h_s_128(m, n)
+        self.cond_g_a = g_a_1ch_partial_spconv(m)
 
         self.cond_fuse = nn.ModuleDict({
             "enc_cond_h2": conv1x1(C32, C32),

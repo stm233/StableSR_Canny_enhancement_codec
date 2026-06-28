@@ -1,4 +1,8 @@
-"""P-frame spconv Canny1ch with canny64_lossy conditional encoder fusion."""
+"""P-frame Canny1ch with canny64_lossy conditional encoder fusion.
+
+Inherits partial-spconv g_a/g_s from HPCM_Canny1ch_Spconv_Cond (encoder first two stages,
+decoder last two stages); h_a/h_s use dense conv.
+"""
 
 from __future__ import annotations
 

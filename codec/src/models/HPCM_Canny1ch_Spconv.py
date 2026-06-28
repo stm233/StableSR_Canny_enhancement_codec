@@ -1,5 +1,6 @@
 """HPCM Canny1ch with spconv convolutions in g_a/g_s/h_a/h_s (ablation variant).
 
+Also provides partial-spconv g_a/g_s (first two encoder stages / last two decoder stages only).
 Dense entropy / spatial-prior path unchanged. Checkpoint weights are NOT compatible
 with HPCM_Canny1ch (dense conv) or HPCM_Canny1ch_ME.
 """
@@ -9,7 +10,8 @@ from torch import nn
 
 from .base import BB as basemodel
 from .HPCM_Base import CrossAttentionCell, y_spatial_prior_s1_s2
-from .HPCM_Canny1ch import LATENT_M, LATENT_N
+from .HPCM_Canny1ch import LATENT_M, LATENT_N, h_a_128, h_s_128
+from src.layers import PConvRB, conv2x2_down, conv4x4_down, deconv2x2_up, deconv4x4_up
 from src.layers import conv1x1
 from src.layers.spconv_conv import (
     spconv_conv2x2_down,
@@ -19,7 +21,17 @@ from src.layers.spconv_conv import (
 )
 from src.layers.spconv_res_blk import SpconvPConvRB
 
-__all__ = ["HPCM", "LATENT_M", "LATENT_N", "g_a_1ch_spconv", "g_s_1ch_spconv", "h_a_128_spconv", "h_s_128_spconv"]
+__all__ = [
+    "HPCM",
+    "LATENT_M",
+    "LATENT_N",
+    "g_a_1ch_spconv",
+    "g_s_1ch_spconv",
+    "g_a_1ch_partial_spconv",
+    "g_s_1ch_partial_spconv",
+    "h_a_128_spconv",
+    "h_s_128_spconv",
+]
 
 
 class g_a_1ch_spconv(nn.Module):
@@ -66,6 +78,60 @@ class g_s_1ch_spconv(nn.Module):
             spconv_deconv2x2_up(c128, c64),
             SpconvPConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             SpconvPConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            spconv_deconv2x2_up(c64, c32),
+            SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            spconv_deconv4x4_up(c32, 1),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
+class g_a_1ch_partial_spconv(nn.Module):
+    """g_a: spconv in first two stages (H/2 @32ch, H/4 @64ch); dense conv elsewhere."""
+
+    def __init__(self, m: int = LATENT_M):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        c32, c64, c128 = 32, 64, 128
+        self.branch = nn.Sequential(
+            spconv_conv4x4_down(1, c32),
+            SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            spconv_conv2x2_down(c32, c64),
+            SpconvPConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            SpconvPConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(c64, c128),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(c128, m),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
+class g_s_1ch_partial_spconv(nn.Module):
+    """g_s: spconv in last two stages (H/4->H/2 @32ch, H/2->H); dense conv elsewhere."""
+
+    def __init__(self, m: int = LATENT_M):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        c32, c64, c128 = 32, 64, 128
+        self.branch = nn.Sequential(
+            deconv2x2_up(m, c128),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            deconv2x2_up(c128, c64),
+            PConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             spconv_deconv2x2_up(c64, c32),
             SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
