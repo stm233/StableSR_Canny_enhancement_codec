@@ -18,8 +18,18 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
+from ddp_utils import (
+    barrier,
+    cleanup_distributed,
+    is_main_process,
+    reduce_scalar,
+    setup_distributed,
+    unwrap_model,
+    wrap_ddp,
+)
 from src.datasets import (
     IFrameDataset,
     PFrameDataset,
@@ -79,14 +89,6 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-class CustomDataParallel(nn.DataParallel):
-    def __getattr__(self, key):
-        try:
-            return super().__getattr__(key)
-        except AttributeError:
-            return getattr(self.module, key)
-
-
 def _is_cond_model(model_name: str) -> bool:
     return model_name.endswith("_Cond")
 
@@ -115,12 +117,24 @@ def _unpack_batch(batch, stage: str, device: torch.device):
 
 
 def train_one_epoch(
-    model, criterion, train_dataloader, optimizer, epoch, global_step, clip_max_norm, stage
+    model,
+    criterion,
+    train_dataloader,
+    optimizer,
+    epoch,
+    global_step,
+    clip_max_norm,
+    stage,
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+    is_distributed: bool = False,
 ):
     model.train()
     device = next(model.parameters()).device
     meters = {k: AverageMeter() for k in ("loss", "bpp_loss", "mse_loss", "psnr", "y_bpp", "z_bpp")}
     t_start = time.time()
+    log_interval = 1000
 
     for i, batch in enumerate(train_dataloader):
         global_step += 1
@@ -132,27 +146,35 @@ def train_one_epoch(
         if clip_max_norm > 0:
             total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
             if total_norm.isnan() or total_norm.isinf():
-                print("non-finite norm, skip this batch")
+                if is_main_process(rank):
+                    print("non-finite norm, skip this batch")
                 continue
         optimizer.step()
 
         for key in meters:
             meters[key].update(out_criterion[key])
 
-        if i % 1000 == 0:
+        if is_main_process(rank) and i % log_interval == 0:
             t_end = time.time() - t_start
             t_start = time.time()
             bs = target.size(0)
+            loss_avg = reduce_scalar(meters["loss"].avg, device, is_distributed)
+            mse_avg = reduce_scalar(meters["mse_loss"].avg, device, is_distributed)
+            psnr_avg = reduce_scalar(meters["psnr"].avg, device, is_distributed)
+            bpp_avg = reduce_scalar(meters["bpp_loss"].avg, device, is_distributed)
+            y_bpp_avg = reduce_scalar(meters["y_bpp"].avg, device, is_distributed)
+            z_bpp_avg = reduce_scalar(meters["z_bpp"].avg, device, is_distributed)
+            seen = min(i * bs * world_size, len(train_dataloader.dataset))
             print(
                 f"Train epoch {epoch} [{stage}]: ["
-                f"{i * bs}/{len(train_dataloader.dataset)} "
-                f"({100.0 * i / len(train_dataloader):.0f}%)]"
-                f"\tLoss: {meters['loss'].avg:.4f} |"
-                f"\tMSE: {meters['mse_loss'].avg:.6f} |"
-                f"\tPSNR: {meters['psnr'].avg:.3f} |"
-                f"\tBpp: {meters['bpp_loss'].avg:.4f} |"
-                f"\ty bpp: {meters['y_bpp'].avg:.4f} |"
-                f"\tz bpp: {meters['z_bpp'].avg:.4f} |"
+                f"{seen}/{len(train_dataloader.dataset)} "
+                f"({100.0 * i / max(len(train_dataloader), 1):.0f}%)]"
+                f"\tLoss: {loss_avg:.4f} |"
+                f"\tMSE: {mse_avg:.6f} |"
+                f"\tPSNR: {psnr_avg:.3f} |"
+                f"\tBpp: {bpp_avg:.4f} |"
+                f"\ty bpp: {y_bpp_avg:.4f} |"
+                f"\tz bpp: {z_bpp_avg:.4f} |"
                 f"\ttime: {t_end:.2f}"
             )
             torch.cuda.empty_cache()
@@ -278,8 +300,22 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
+def _resolve_device(args, local_rank: int, is_distributed: bool) -> torch.device:
+    if is_distributed:
+        return torch.device(f"cuda:{local_rank}")
+    if args.cuda and torch.cuda.is_available():
+        if torch.cuda.device_count() > 1:
+            print(
+                "WARNING: Multiple GPUs visible but DDP is off. "
+                "Use NPROC>1 with torchrun for multi-GPU training. Using cuda:0."
+            )
+        return torch.device("cuda:0")
+    return torch.device("cpu")
+
+
 def main(argv):
     args = parse_args(argv)
+    rank, local_rank, world_size, is_distributed = setup_distributed()
     if args.model_name is None:
         if args.stage == "pframe":
             args.model_name = (
@@ -291,30 +327,40 @@ def main(argv):
             args.model_name = (
                 "HPCM_Canny1ch_Spconv_Cond" if args.hqvsr_codec else "HPCM_Canny1ch"
             )
-    print(args)
+    if is_main_process(rank):
+        print(args)
+        if is_distributed:
+            print(f"DDP: rank={rank}/{world_size}, local_rank={local_rank}")
+            print(f"Effective batch size: {args.batch_size * world_size}")
 
     tag = f"{args.model_name}_{args.stage}_lmbda{args.lmbda}"
     if getattr(args, "pframe_cache_dir", ""):
         tag += "_cached"
     args.log_dir = os.path.join(args.log_dir, tag)
     args.save_path = os.path.join(args.save_path, tag)
-    os.makedirs(args.log_dir, exist_ok=True)
-    os.makedirs(args.save_path, exist_ok=True)
+    if is_main_process(rank):
+        os.makedirs(args.log_dir, exist_ok=True)
+        os.makedirs(args.save_path, exist_ok=True)
+    barrier(is_distributed)
 
     if args.seed is not None:
-        torch.manual_seed(args.seed)
-        random.seed(args.seed)
+        torch.manual_seed(args.seed + rank)
+        random.seed(args.seed + rank)
+        np.random.seed(args.seed + rank)
 
     train_dataset, test_dataset = build_datasets(args)
-    print(f"Train samples: {len(train_dataset)}, Val samples: {len(test_dataset)}")
+    if is_main_process(rank):
+        print(f"Train samples: {len(train_dataset)}, Val samples: {len(test_dataset)}")
 
-    device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
+    device = _resolve_device(args, local_rank, is_distributed)
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=args.num_workers,
-        pin_memory=(device == "cuda"),
+        pin_memory=(device.type == "cuda"),
         drop_last=True,
     )
     test_loader = DataLoader(
@@ -322,26 +368,23 @@ def main(argv):
         batch_size=args.test_batch_size,
         num_workers=min(8, args.num_workers),
         shuffle=False,
-        pin_memory=(device == "cuda"),
+        pin_memory=(device.type == "cuda"),
     )
 
     net = importlib.import_module(f".{args.model_name}", "src.models").HPCM()
-    print(net)
+    if is_main_process(rank):
+        print(net)
     net = net.to(device)
 
-    if device == "cuda" and torch.cuda.device_count() > 1:
-        net = CustomDataParallel(net)
-
     if args.resume:
-        target = net.module if isinstance(net, CustomDataParallel) else net
-        print(f"Resuming P-frame checkpoint: {args.resume}")
-        if hasattr(target, "load_resume_checkpoint"):
-            target.load_resume_checkpoint(args.resume, map_location=device)
+        if is_main_process(rank):
+            print(f"Resuming P-frame checkpoint: {args.resume}")
+        if hasattr(net, "load_resume_checkpoint"):
+            net.load_resume_checkpoint(args.resume, map_location=device)
         else:
             ckpt = torch.load(args.resume, map_location=device)
-            target.load_state_dict(ckpt, strict=True)
+            net.load_state_dict(ckpt, strict=True)
     elif args.checkpoint or args.p_codec_init:
-        target = net.module if isinstance(net, CustomDataParallel) else net
         if args.model_name in (
             "HPCM_Video_PFrame",
             "HPCM_Video_PFrame_DT1ch",
@@ -351,20 +394,28 @@ def main(argv):
             "HPCM_Video_PFrame_Canny1ch_Spconv_Cond",
         ):
             if args.checkpoint:
-                print(f"Loading I-frame checkpoint (ref path only): {args.checkpoint}")
-                target.load_iframe_checkpoint(args.checkpoint, map_location=device)
+                if is_main_process(rank):
+                    print(f"Loading I-frame checkpoint (ref path only): {args.checkpoint}")
+                net.load_iframe_checkpoint(args.checkpoint, map_location=device)
             if args.p_codec_init:
-                print(f"Loading P-frame codec init: {args.p_codec_init}")
-                target.load_p_codec_checkpoint(args.p_codec_init, map_location=device)
+                if is_main_process(rank):
+                    print(f"Loading P-frame codec init: {args.p_codec_init}")
+                net.load_p_codec_checkpoint(args.p_codec_init, map_location=device)
         elif args.checkpoint:
-            print(f"Loading checkpoint: {args.checkpoint}")
+            if is_main_process(rank):
+                print(f"Loading checkpoint: {args.checkpoint}")
             checkpoint = torch.load(args.checkpoint, map_location=device)
-            target.load_state_dict(checkpoint, strict=True)
+            net.load_state_dict(checkpoint, strict=True)
+
+    barrier(is_distributed)
+    if is_distributed:
+        find_unused = args.stage == "pframe"
+        net = wrap_ddp(net, local_rank, find_unused_parameters=find_unused)
 
     # LR schedule: same rates as train.py, milestones ÷10 (2750→275, 2850→285, 2950→295)
     optimizer = optim.Adam(net.parameters(), lr=1e-4)
     criterion = RateDistortionLoss(lmbda=args.lmbda)
-    writer = SummaryWriter(args.log_dir)
+    writer = SummaryWriter(args.log_dir) if is_main_process(rank) else None
 
     def lr_scheduler(epoch):
         if epoch < 275:
@@ -377,23 +428,48 @@ def main(argv):
 
     best_loss = float("inf")
     global_step = 0
-    for epoch in range(args.epochs):
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr_scheduler(epoch)
-        print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+    try:
+        for epoch in range(args.epochs):
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr_scheduler(epoch)
+            if is_main_process(rank):
+                print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
 
-        global_step = train_one_epoch(
-            net, criterion, train_loader, optimizer, epoch, global_step, args.clip_max_norm, args.stage
-        )
-        loss = test_epoch(epoch, test_loader, net, criterion, writer, args.stage)
+            global_step = train_one_epoch(
+                net,
+                criterion,
+                train_loader,
+                optimizer,
+                epoch,
+                global_step,
+                args.clip_max_norm,
+                args.stage,
+                rank=rank,
+                world_size=world_size,
+                is_distributed=is_distributed,
+            )
 
-        if loss < best_loss:
-            best_loss = loss
-            print(f"epoch {epoch} is best now!")
-            torch.save(net.state_dict(), os.path.join(args.save_path, "epoch_best.pth.tar"))
-
-        if args.save_interval > 0 and epoch % args.save_interval == 0:
-            torch.save(net.state_dict(), os.path.join(args.save_path, f"epoch_{epoch}.pth.tar"))
+            if is_main_process(rank):
+                loss = test_epoch(epoch, test_loader, net, criterion, writer, args.stage)
+                if loss < best_loss:
+                    best_loss = loss
+                    print(f"epoch {epoch} is best now!")
+                    torch.save(
+                        unwrap_model(net).state_dict(),
+                        os.path.join(args.save_path, "epoch_best.pth.tar"),
+                    )
+                if args.save_interval > 0 and epoch % args.save_interval == 0:
+                    torch.save(
+                        unwrap_model(net).state_dict(),
+                        os.path.join(args.save_path, f"epoch_{epoch}.pth.tar"),
+                    )
+            barrier(is_distributed)
+    finally:
+        if writer is not None:
+            writer.close()
+        cleanup_distributed(is_distributed)
 
 
 if __name__ == "__main__":

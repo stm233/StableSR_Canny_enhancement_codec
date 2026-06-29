@@ -22,6 +22,7 @@ SIZE="${SIZE:-512}"
 INIT_CKPT="${INIT_CKPT:-}"
 LAMBDA="${LAMBDA:-0.00105}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
+NPROC="${NPROC:-1}"
 EPOCHS="${EPOCHS:-3001}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-100}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
@@ -62,13 +63,14 @@ fi
 
 echo "Stage:      iframe (1ch canny)"
 echo "Lambda:     ${LAMBDA}"
+echo "NPROC:      ${NPROC} (effective batch=$((BATCH_SIZE * NPROC)))"
 echo "Save every: ${SAVE_INTERVAL} epochs"
 echo "Data:       ${DATA_ROOT}"
 echo "Save:       ${SAVE_PATH}"
 echo ""
 
 cd "${CODEC_ROOT}"
-"${PYTHON}" train_video.py \
+run_train train_video.py \
   --stage iframe \
   --model_name HPCM_Canny1ch \
   --dataset-root "${DATA_ROOT}" \

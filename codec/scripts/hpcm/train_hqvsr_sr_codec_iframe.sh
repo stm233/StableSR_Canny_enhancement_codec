@@ -7,6 +7,7 @@ DATA_ROOT="${DATA_ROOT:-/data/Dataset/HQ-VSR_SR_codec}"
 PREPARE_MANIFEST="${PREPARE_MANIFEST:-1}"
 LAMBDA="${LAMBDA:-0.00105}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
+NPROC="${NPROC:-1}"
 EPOCHS="${EPOCHS:-3001}"
 PATCH_SIZE="${PATCH_SIZE:-256}"
 VAL_SAMPLES="${VAL_SAMPLES:-500}"
@@ -22,7 +23,8 @@ if [[ "${PREPARE_MANIFEST}" == "1" ]]; then
 fi
 
 cd "${LIC_ROOT}"
-"${PYTHON}" train_video.py \
+echo "NPROC=${NPROC} (effective batch=$((BATCH_SIZE * NPROC)))"
+run_train train_video.py \
   --stage iframe \
   --hqvsr-codec \
   --model_name HPCM_Canny1ch_Spconv_Cond \

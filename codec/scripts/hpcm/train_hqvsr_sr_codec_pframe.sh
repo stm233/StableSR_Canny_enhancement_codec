@@ -8,6 +8,7 @@ PREPARE_MANIFEST="${PREPARE_MANIFEST:-1}"
 INIT_CKPT="${INIT_CKPT:-/data/Dataset/LIC-HPCM_outputs/hqvsr_sr_codec_iframe_cond/checkpoints/HPCM_Canny1ch_Spconv_Cond_lmbda0.00105/epoch_best.pth.tar}"
 LAMBDA="${LAMBDA:-0.00105}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
+NPROC="${NPROC:-1}"
 EPOCHS="${EPOCHS:-3001}"
 PATCH_SIZE="${PATCH_SIZE:-256}"
 VAL_SAMPLES="${VAL_SAMPLES:-500}"
@@ -29,7 +30,8 @@ fi
 }
 
 cd "${LIC_ROOT}"
-"${PYTHON}" train_video.py \
+echo "NPROC=${NPROC} (effective batch=$((BATCH_SIZE * NPROC)))"
+run_train train_video.py \
   --stage pframe \
   --hqvsr-codec \
   --model_name HPCM_Video_PFrame_Canny1ch_Spconv_Cond \
