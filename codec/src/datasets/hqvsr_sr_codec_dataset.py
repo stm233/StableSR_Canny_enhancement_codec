@@ -7,13 +7,10 @@ import random
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 
 from .video_codec_dataset import (
-    PFrameDataset,
-    _AugmentCropFlip,
     _l_to_tensor01,
     _load_manifest,
     _prev_canny_rel,
@@ -43,16 +40,35 @@ def _scan_pairs(
     return records
 
 
-def _upsample_cond(cond: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def _augment_target_cond(
+    target: torch.Tensor,
+    cond: torch.Tensor,
+    patch_size: tuple[int, int] | int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Random crop/flip on target; cond cropped at H/4 aligned coordinates."""
+    if patch_size is None:
+        return target, cond
+    if isinstance(patch_size, int):
+        patch_size = (patch_size, patch_size)
+    ph, pw = patch_size
     _, h, w = target.shape
-    if cond.shape[-2:] == (h, w):
-        return cond
-    return F.interpolate(
-        cond.unsqueeze(0),
-        size=(h, w),
-        mode="bicubic",
-        align_corners=False,
-    ).squeeze(0)
+    if h < ph or w < pw:
+        raise ValueError(f"Image {h}x{w} smaller than patch {ph}x{pw}")
+    top = random.randint(0, h - ph)
+    left = random.randint(0, w - pw)
+    target = target[:, top : top + ph, left : left + pw]
+    scale_h = max(1, h // cond.shape[-2])
+    scale_w = max(1, w // cond.shape[-1])
+    ct, cl = top // scale_h, left // scale_w
+    cph, cpw = max(1, ph // scale_h), max(1, pw // scale_w)
+    cond = cond[:, ct : ct + cph, cl : cl + cpw]
+    if random.random() < 0.5:
+        target = torch.flip(target, dims=[2])
+        cond = torch.flip(cond, dims=[2])
+    if random.random() < 0.5:
+        target = torch.flip(target, dims=[1])
+        cond = torch.flip(cond, dims=[1])
+    return target, cond
 
 
 class HQVSRCondIFrameDataset(Dataset):
@@ -77,7 +93,6 @@ class HQVSRCondIFrameDataset(Dataset):
             self.records = rng.sample(self.records, max_samples)
         self.patch_size = patch_size
         self.train = train
-        self.augment = _AugmentCropFlip(patch_size) if train and patch_size else None
 
     def __len__(self) -> int:
         return len(self.records)
@@ -86,9 +101,8 @@ class HQVSRCondIFrameDataset(Dataset):
         rec = self.records[idx]
         target = _l_to_tensor01(Image.open(self.codec_root / rec["target"]).convert("L"))
         cond = _l_to_tensor01(Image.open(self.codec_root / rec["cond"]).convert("L"))
-        cond = _upsample_cond(cond, target)
-        if self.augment is not None:
-            target, cond = self.augment([target, cond])
+        if self.train and self.patch_size is not None:
+            target, cond = _augment_target_cond(target, cond, self.patch_size)
         return {"input": target, "cond": cond, "target": target}
 
 
@@ -108,7 +122,23 @@ class HQVSRCondPFrameDataset(Dataset):
         self.records = _load_manifest(self.codec_root / manifest)
         self.patch_size = patch_size
         self.train = train
-        self.augment = _AugmentCropFlip(patch_size) if train and patch_size else None
+
+    def _augment_pframe(
+        self,
+        p_input: torch.Tensor,
+        ref_iframe: torch.Tensor,
+        target: torch.Tensor,
+        cond: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        curr = target
+        target, cond = _augment_target_cond(curr, cond, self.patch_size)
+        _, h, w = target.shape
+        _, oh, ow = curr.shape
+        top = (oh - h) // 2 if oh > h else 0
+        left = (ow - w) // 2 if ow > w else 0
+        p_input = p_input[:, top : top + h, left : left + w]
+        ref_iframe = ref_iframe[:, top : top + h, left : left + w]
+        return p_input, ref_iframe, target, cond
 
     def __len__(self) -> int:
         return len(self.records)
@@ -124,15 +154,14 @@ class HQVSRCondPFrameDataset(Dataset):
         cond = _l_to_tensor01(
             Image.open(self.codec_root / rec["cond"]).convert("L")
         )
-        cond = _upsample_cond(cond, curr_canny)
 
         p_input = torch.cat([prev_canny, prev_canny, curr_canny], dim=0)
         ref_iframe = prev_canny.repeat(3, 1, 1)
         target = curr_canny
 
-        if self.augment is not None:
-            p_input, ref_iframe, target, cond = self.augment(
-                [p_input, ref_iframe, target, cond]
+        if self.train and self.patch_size is not None:
+            p_input, ref_iframe, target, cond = self._augment_pframe(
+                p_input, ref_iframe, target, cond
             )
 
         return {

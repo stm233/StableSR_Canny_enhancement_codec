@@ -29,6 +29,8 @@ __all__ = [
     "g_s_1ch_spconv",
     "g_a_1ch_partial_spconv",
     "g_s_1ch_partial_spconv",
+    "g_a_1ch_sparse2_dense2_cond",
+    "g_s_1ch_dense_cond",
     "h_a_128_spconv",
     "h_s_128_spconv",
 ]
@@ -136,6 +138,60 @@ class g_s_1ch_partial_spconv(nn.Module):
             SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
             spconv_deconv4x4_up(c32, 1),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
+class g_a_1ch_sparse2_dense2_cond(nn.Module):
+    """Encoder: sparse stages 256->64, channel-concat cond @ H/4, dense stages to latent."""
+
+    def __init__(self, m: int = LATENT_M):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        c32, c64, c128 = 32, 64, 128
+        self.branch = nn.Sequential(
+            spconv_conv4x4_down(1, c32),
+            SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            SpconvPConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            spconv_conv2x2_down(c32, c64),
+            SpconvPConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            SpconvPConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(c64 + 1, c128),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            conv2x2_down(c128, m),
+        )
+
+    def forward(self, x):
+        return self.branch(x)
+
+
+class g_s_1ch_dense_cond(nn.Module):
+    """Decoder: all dense; channel-concat cond @ H/4 before final upsample stages."""
+
+    def __init__(self, m: int = LATENT_M):
+        super().__init__()
+        mlp_ratio = 4
+        partial_ratio = 4
+        c32, c64, c128 = 32, 64, 128
+        self.branch = nn.Sequential(
+            deconv2x2_up(m, c128),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c128, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            deconv2x2_up(c128, c64),
+            PConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c64, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            deconv2x2_up(c64 + 1, c32),
+            PConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            PConvRB(c32, mlp_ratio=mlp_ratio, partial_ratio=partial_ratio),
+            deconv4x4_up(c32, 1),
         )
 
     def forward(self, x):

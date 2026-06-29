@@ -1,8 +1,4 @@
-"""P-frame Canny1ch with canny64_lossy conditional encoder fusion.
-
-Inherits partial-spconv g_a/g_s from HPCM_Canny1ch_Spconv_Cond (encoder first two stages,
-decoder last two stages); h_a/h_s use dense conv.
-"""
+"""P-frame Canny1ch with native 64x64 cond channel-concat (same as I-frame codec)."""
 
 from __future__ import annotations
 
@@ -13,7 +9,6 @@ from src.layers import conv1x1
 
 from . import HPCM_Canny1ch_Spconv_Cond
 from .codec_fusion import (
-    extract_ga_encoder_cond_feats,
     g_a_forward,
     g_s_decode_multiscale,
     lossy_iframe_ref_bundle,
@@ -39,20 +34,13 @@ class HPCM(nn.Module):
             "dec_f1": conv1x1(C64, C64),
             "dec_f2": conv1x1(C128, C128),
         })
-        self.cond_fuse = nn.ModuleDict({
-            "enc_cond_h2": conv1x1(C32, C32),
-            "enc_cond_h4": conv1x1(C64, C64),
-            "dec_cond_h4_f2": conv1x1(C64, C128),
-            "dec_cond_h4_f1": conv1x1(C64, C64),
-            "dec_cond_h2": conv1x1(C32, C32),
-        })
         self.temporal_ctx_conv = conv1x1(M, CTX_CH)
         self.context_merge = conv1x1(CTX_CH * 2, CTX_CH)
         self._init_fusion()
 
     def _init_fusion(self) -> None:
         with torch.no_grad():
-            for m in list(self.fuse.values()) + list(self.cond_fuse.values()):
+            for m in self.fuse.values():
                 m.weight.zero_()
                 if m.bias is not None:
                     m.bias.zero_()
@@ -95,11 +83,6 @@ class HPCM(nn.Module):
         f4 = self.temporal_ctx_conv(ref_feats["f3"])
         return self.context_merge(torch.cat([params, f4], dim=1))
 
-    def _cond_feats(self, cond: torch.Tensor | None) -> dict[str, torch.Tensor] | None:
-        if cond is None:
-            return None
-        return extract_ga_encoder_cond_feats(self.codec.cond_g_a, cond)
-
     def forward(self, batch: dict, training=None):
         cond = batch.get("cond")
         if "ref_feats" in batch:
@@ -116,9 +99,8 @@ class HPCM(nn.Module):
         if training is None:
             training = self.training
         codec = self.codec
-        cond_feats = self._cond_feats(cond)
 
-        y = g_a_forward(codec.g_a, p_input, ref_feats, self.fuse, cond_feats, self.cond_fuse)
+        y = g_a_forward(codec.g_a, p_input, ref_feats, self.fuse, cond=cond)
         z = codec.h_a(y)
 
         if training:
@@ -135,7 +117,7 @@ class HPCM(nn.Module):
         y_res, y_q, y_hat, scales_y = codec.forward_hpcm(y, params)
 
         _, x_hat = g_s_decode_multiscale(
-            codec.g_s, y_hat, ref_feats, self.fuse, cond_feats, self.cond_fuse
+            codec.g_s, y_hat, ref_feats, self.fuse, cond=cond
         )
         x_hat = x_hat.clamp(0.0, 1.0)
 
@@ -155,8 +137,7 @@ class HPCM(nn.Module):
         from src.entropy_models import ubransEncoder
 
         codec = self.codec
-        cond_feats = self._cond_feats(cond)
-        y = g_a_forward(codec.g_a, x_pad, ref_feats, self.fuse, cond_feats, self.cond_fuse)
+        y = g_a_forward(codec.g_a, x_pad, ref_feats, self.fuse, cond=cond)
         z = codec.h_a(y)
         z_res_hat = torch.round(z - codec.means_hyper)
         indexes_z = codec.build_indexes_z(z_res_hat.size())
@@ -176,7 +157,7 @@ class HPCM(nn.Module):
         y_q_list, scale_list = codec.forward_hpcm(y, params, write=True)
 
         encoder_y = ubransEncoder()
-        codec.compress_y_two_group_lite(y_q_list, scale_list, encoder_y)
+        codec.compress_y_four_group_lite(y_q_list, scale_list, encoder_y)
         y_string = encoder_y.flush()
         return {"strings": [y_string, z_string], "shape": z_res_hat.size()[2:]}
 
@@ -185,7 +166,6 @@ class HPCM(nn.Module):
         from src.entropy_models import ubransDecoder
 
         codec = self.codec
-        cond_feats = self._cond_feats(cond)
         device = codec.quantized_cdf_z.device
         output_size = (1, codec.scales_hyper.size(1), *shape)
         indexes_z = codec.build_indexes_z(output_size).to(device)
@@ -206,7 +186,7 @@ class HPCM(nn.Module):
         decoder_y.set_stream(strings[0])
         y_hat = codec.decompress_hpcm(params, decoder_y)
         _, x_hat = g_s_decode_multiscale(
-            codec.g_s, y_hat, ref_feats, self.fuse, cond_feats, self.cond_fuse
+            codec.g_s, y_hat, ref_feats, self.fuse, cond=cond
         )
         ref_next = ref_feats_from_latent(codec.g_s, y_hat)
         return {

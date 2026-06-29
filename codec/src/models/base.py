@@ -220,6 +220,22 @@ class BB(nn.Module):
                 mask_3 = torch.cat((m * m3, m * m3), dim=1)
                 self.mask_for_four_part[curr_mask_str] = [mask_0, mask_1, mask_2, mask_3]
         return [m.to(device) for m in self.mask_for_four_part[curr_mask_str]]
+
+    def get_mask_four_parts_four_groups(self, batch, channel, height, width, dtype, device):
+        """4 checkerboard phases; channel split into 4 groups."""
+        curr_mask_str = f"4g_{batch}_{channel}x{width}x{height}"
+        with torch.no_grad():
+            if curr_mask_str not in self.mask_for_four_part:
+                assert channel % 4 == 0, f"channel {channel} must be divisible by 4"
+                quarter = channel // 4
+                m = torch.ones((batch, quarter, height, width), dtype=dtype, device=device)
+                m0, m1, m2, m3 = self.get_one_channel_four_parts_mask(height, width, dtype, device)
+                mask_0 = torch.cat((m * m0, m * m0, m * m0, m * m0), dim=1)
+                mask_1 = torch.cat((m * m1, m * m1, m * m1, m * m1), dim=1)
+                mask_2 = torch.cat((m * m2, m * m2, m * m2, m * m2), dim=1)
+                mask_3 = torch.cat((m * m3, m * m3, m * m3, m * m3), dim=1)
+                self.mask_for_four_part[curr_mask_str] = [mask_0, mask_1, mask_2, mask_3]
+        return [m.to(device) for m in self.mask_for_four_part[curr_mask_str]]
     
     def get_one_channel_eight_parts_mask(self, height, width, dtype, device):
         patten_list = [((1, 0, 0, 0), (0, 0, 0, 0), (0, 0, 1, 0), (0, 0, 0, 0)), ((0, 0, 1, 0), (0, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0)), \
@@ -397,6 +413,29 @@ class BB(nn.Module):
         cdf_len = self.cdf_length_y.cpu().numpy()
         off = self.offset_y.cpu().numpy()
         for s_part in scales_hat.chunk(2, 1):
+            indexes = self.build_indexes_conditional(s_part)
+            parts.append(self.decompress_symbols(indexes, cdf, cdf_len, off, decoder_y))
+        y_q = torch.cat(parts, dim=1)
+        return y_q + means * mask
+
+    def compress_y_four_group_lite(self, y_q_list, scale_list, encoder_y):
+        """4 checkerboard steps; encode each channel quarter separately."""
+        cdf = self.quantized_cdf_y.cpu().numpy()
+        cdf_len = self.cdf_length_y.cpu().numpy()
+        off = self.offset_y.cpu().numpy()
+        for y_q, s_hat in zip(y_q_list, scale_list):
+            for y_part, s_part in zip(y_q.chunk(4, 1), s_hat.chunk(4, 1)):
+                indexes = self.build_indexes_conditional(s_part)
+                self.compress_symbols(y_part, indexes, cdf, cdf_len, off, encoder_y)
+
+    def decompress_y_four_group_lite_step(self, scales, means, mask, decoder_y):
+        """Inverse of one checkerboard step for four-group lite entropy."""
+        scales_hat = scales * mask
+        parts = []
+        cdf = self.quantized_cdf_y.cpu().numpy()
+        cdf_len = self.cdf_length_y.cpu().numpy()
+        off = self.offset_y.cpu().numpy()
+        for s_part in scales_hat.chunk(4, 1):
             indexes = self.build_indexes_conditional(s_part)
             parts.append(self.decompress_symbols(indexes, cdf, cdf_len, off, decoder_y))
         y_q = torch.cat(parts, dim=1)

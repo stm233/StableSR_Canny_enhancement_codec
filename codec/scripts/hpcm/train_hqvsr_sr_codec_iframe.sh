@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# I-frame: compress canny256 with cond=canny64_lossy (partial spconv g_a/g_s + multi-scale fusion).
+# I-frame: canny256 + native canny64_lossy cond (channel-concat @ H/4, sparse enc + dense dec).
 source "$(dirname "$0")/env.sh"
 set -euo pipefail
 
